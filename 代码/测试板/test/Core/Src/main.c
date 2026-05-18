@@ -162,21 +162,6 @@ int main(void)
   /* USER CODE END 3 */
 }
 
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
-{
-  if(hadc == &hadc1)
-  {
-    // ====== 第一轮转换的数据（第1、2通道） ======
-    ADC1_CH1 = (uint16_t)(adc_ui_original[0] & 0xFFFF); // ADC1 的第 1 个通道
-    ADC2_CH1 = (uint16_t)(adc_ui_original[0] >> 16);    // ADC2 的第 1 个通道
-
-    // ====== 第二轮转换的数据（第3、4通道） ======
-    ADC1_CH2 = (uint16_t)(adc_ui_original[1] & 0xFFFF); // ADC1 的第 2 个通道
-    //ADC2_CH2 = (uint16_t)(adc_ui_original[1] >> 16);     空数据
-
-  }
-}
-
 /**
   * @brief System Clock Configuration
   * @retval None

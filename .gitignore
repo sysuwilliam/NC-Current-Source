@@ -3,3 +3,4 @@
 
 *.exe
 *.dll
+/代码/测试板/test/cmake-build-debug/
