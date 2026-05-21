@@ -1,6 +1,45 @@
+# Editor / IDE
 .history/
+.idea/
 .vscode/
+.vs/
+.settings/
+*.code-workspace
+*.launch
 
+# STM32CubeIDE / Eclipse metadata
+.project
+.cproject
+
+# CMake / Ninja build outputs
+build/
+cmake-build-*/
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+build.ninja
+.ninja_*
+compile_commands.json
+
+# Embedded firmware artifacts
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.o
+*.obj
+*.d
+*.su
+*.a
+*.lib
+
+# Windows / Office temporary files
+Thumbs.db
+Desktop.ini
+~$*
+
+# Native binaries
 *.exe
 *.dll
-/代码/测试板/test/cmake-build-debug/
