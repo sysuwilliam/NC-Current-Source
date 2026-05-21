@@ -7,4 +7,6 @@
 #include "main.h"
 
 void BUCK_Enable(void);
+void Safe_Off(void);
+void Safe_Init (void);
 #endif //INC_2026_5_4_ENABLE_H

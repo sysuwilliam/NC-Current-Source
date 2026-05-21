@@ -33,13 +33,18 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="28472c45-c514-407a-b5c9-d3c2f473c693" name="更改" comment="DAC加ADC">
-      <change beforePath="$PROJECT_DIR$/.idea/.gitignore" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/editor.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/校赛恒流源.iml" beforeDir="false" />
+    <list default="true" id="28472c45-c514-407a-b5c9-d3c2f473c693" name="更改" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/.mxproject" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/.mxproject" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/Core/Inc/main.h" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/Core/Inc/main.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/Core/Inc/stm32f1xx_it.h" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/Core/Inc/stm32f1xx_it.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/Core/Src/gpio.c" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/Core/Src/gpio.c" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/Core/Src/main.c" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/Core/Src/main.c" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/Core/Src/stm32f1xx_it.c" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/Core/Src/stm32f1xx_it.c" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/Core/lib/ENABLE.c" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/Core/lib/ENABLE.c" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/Core/lib/ENABLE.h" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/Core/lib/ENABLE.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/代码/测试板/test/test.ioc" beforeDir="false" afterPath="$PROJECT_DIR$/代码/测试板/test/test.ioc" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -100,13 +105,6 @@
       <recent name="D:\code\校赛恒流源\代码\测试板\2026.5.4\lib" />
     </key>
   </component>
-  <component name="RunManager">
-    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
-      </method>
-    </configuration>
-  </component>
   <component name="TaskManager">
     <task active="true" id="Default" summary="默认任务">
       <changelist id="28472c45-c514-407a-b5c9-d3c2f473c693" name="更改" comment="" />
@@ -117,7 +115,9 @@
       <workItem from="1779077014916" duration="581000" />
       <workItem from="1779086829834" duration="1189000" />
       <workItem from="1779088049165" duration="975000" />
-      <workItem from="1779090605762" duration="317000" />
+      <workItem from="1779090605762" duration="490000" />
+      <workItem from="1779349611638" duration="1628000" />
+      <workItem from="1779361821004" duration="318000" />
     </task>
     <task id="LOCAL-00001" summary="代码部分DAC加ADC">
       <option name="closed" value="true" />
@@ -135,7 +135,15 @@
       <option name="project" value="LOCAL" />
       <updated>1779090773722</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="删除.idea">
+      <option name="closed" value="true" />
+      <created>1779090945723</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1779090945723</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -161,6 +169,7 @@
     <MESSAGE value="数控恒流源测试_init + README_new" />
     <MESSAGE value="代码部分DAC加ADC" />
     <MESSAGE value="DAC加ADC" />
-    <option name="LAST_COMMIT_MESSAGE" value="DAC加ADC" />
+    <MESSAGE value="删除.idea" />
+    <option name="LAST_COMMIT_MESSAGE" value="删除.idea" />
   </component>
 </project>
