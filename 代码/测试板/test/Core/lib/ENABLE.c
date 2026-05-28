@@ -37,8 +37,8 @@ void Safe_Init (void) {
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin,GPIO_PIN_SET);
     HAL_GPIO_WritePin(BUCK_EN_GPIO_Port, BUCK_EN_Pin,GPIO_PIN_RESET);
 
-    DAC_Set_Voltage(DAC_ADDR_CHANNEL_1, 2.6f);
-    DAC_Set_Voltage(DAC_ADDR_CHANNEL_2, 0);
+    DAC_Set_Voltage(DAC_CHANNEL_1, 1,2.6f);
+    DAC_Set_Voltage(DAC_CHANNEL_2, 1,0);
 }
 
 
@@ -49,7 +49,7 @@ void Delay_us_Block(uint32_t us)
 }
 
 void Safe_Off(void) {
-    DAC_Set_Voltage(DAC_ADDR_CHANNEL_2, 0);
+    DAC_Set_Voltage(DAC_CHANNEL_2,1, 0);
     Delay_us_Block(20000);
     HAL_GPIO_WritePin(SW_IN_GPIO_Port, SW_IN_Pin,GPIO_PIN_RESET);
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin,GPIO_PIN_SET);

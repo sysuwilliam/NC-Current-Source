@@ -42,9 +42,9 @@
 /* USER CODE BEGIN PD */
 #define Rs 1            //采样电阻
 #define SEND_TIME 1000  //发送间隔
-#define MAX_DAC   3.3f
-#define MIN_DAC   0.1f
-#define DAC_COUNT ((int)(MAX_DAC / MIN_DAC)) // 结果为整数 33
+#define MAX_DAC   1.024f
+#define MIN_DAC   0.00025f
+#define DAC_COUNT ((int)(MAX_DAC / MIN_DAC)) // 结果为整数 4096
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -144,12 +144,12 @@ int main(void)
 
       uint16_t current_cnt = __HAL_TIM_GET_COUNTER(&htim4);
 
-      if (current_cnt > DAC_COUNT && current_cnt <= 60)
+      if (current_cnt > DAC_COUNT && current_cnt <= 4500)
       {
         counter = DAC_COUNT;
         __HAL_TIM_SET_COUNTER(&htim4, DAC_COUNT);
       }
-      else if (current_cnt > 60 && current_cnt <= 100)
+      else if (current_cnt > 4501 && current_cnt <= 5000)
       {
         counter = 0;
         __HAL_TIM_SET_COUNTER(&htim4, 0);
@@ -158,20 +158,21 @@ int main(void)
       {
         counter = current_cnt;
       }
-      float dac_voltage = counter * MIN_DAC;
+
+      float dac_voltage = (float)counter * MIN_DAC;
 
       if (!DAC_CHANNEL_FLAG) {
-        DAC_Set_Voltage(DAC_ADDR_CHANNEL_1, dac_voltage);
+        DAC_Set_Voltage(DAC_CHANNEL_1, 2,dac_voltage);
       }else {
-        DAC_Set_Voltage(DAC_ADDR_CHANNEL_2, dac_voltage);
+        DAC_Set_Voltage(DAC_CHANNEL_2,1 ,dac_voltage);
       }
 
-      snprintf(buff, sizeof(buff), "Count: %d\r\n", counter);
+      snprintf(buff, sizeof(buff), "current_cnt: %d\r\n", current_cnt);
       HAL_UART_Transmit(&huart1, (uint8_t *)buff, strlen(buff), 10);
     }
 
 
-
+    DAC_Set_Voltage(DAC_CHANNEL_1,1, 2.3f);
     BUCK_Enable();
     //==============旋转编码器=============//
     if (HAL_GPIO_ReadPin(ENC_SW_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET) {
