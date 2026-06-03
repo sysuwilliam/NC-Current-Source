@@ -27,6 +27,8 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 add_executable(${CMAKE_PROJECT_NAME}
         Core/lib/DAC.c
         Core/lib/ENABLE.c
+        Core/lib/DSP_ADC.c
+        Core/lib/TJC_HMI.c
 )
 
 # Add STM32CubeMX generated sources
