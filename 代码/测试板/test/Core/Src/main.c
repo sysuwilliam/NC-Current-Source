@@ -31,6 +31,7 @@
 #include <string.h>
 #include "ENABLE.h"
 #include "DAC.h"
+#include "DSP_ADC.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,11 +41,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define Rs 1            //采样电阻
-#define SEND_TIME 1000  //发送间隔
-#define MAX_DAC   1.024f
-#define MIN_DAC   0.00025f
-#define DAC_COUNT ((int)(MAX_DAC / MIN_DAC)) // 结果为整数 4096
+
+#define SEND_TIME 3000  //发送间隔
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -55,15 +54,9 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint32_t adc_ui_original[2];        // 存放同步采样的 32 位原始数据
-uint16_t ADC1_CH1 = 0;              // ADC1_CH1: PA1 V_OUT+
-uint16_t ADC2_CH1 = 0;              // ADC2_CH1: PA0 V_OUT-
-uint16_t ADC1_CH2 = 0;              // ADC1_CH2  PB0 V_SENSE
-
 int counter = 0;                    //编码器值
 char buff[50]="";
 
-uint8_t DAC_CHANNEL_FLAG=0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -115,104 +108,36 @@ int main(void)
   MX_TIM4_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+  ADC_Init(); // 开启ADC采样。
+
   DAC_Init(&hspi1);       //初始化DAC
-  Safe_Init ();           //DAC1输出2.6f，DAC输出0，BUCK与SW均关闭
+  Safe_Init ();           //DAC1输出0.0f，DAC输出0.0f，BUCK关闭
 
   HAL_TIM_Encoder_Start(&htim4,TIM_CHANNEL_ALL);      //旋转编码器
   HAL_Delay(20);
 
-  //校准ADC
-  HAL_ADCEx_Calibration_Start(&hadc1);
-  HAL_ADCEx_Calibration_Start(&hadc2);
-
-  HAL_ADC_Start(&hadc2); // 先开启从机
-  HAL_ADCEx_MultiModeStart_DMA(&hadc1, adc_ui_original, 2);//开启DMA
-  HAL_TIM_Base_Start(&htim3);//同步时钟
-
   uint32_t last_tick = HAL_GetTick();
   uint32_t last_tick_buff = HAL_GetTick();
+  int16_t last_counter = -1;
+
+  for (int counter = 0; counter < 10; counter++) {
+    HAL_Delay(100);
+    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    // 每 500ms 检测并处理
-    if (HAL_GetTick() - last_tick_buff >= 500)
-    {
-      last_tick_buff = HAL_GetTick();
-
-      uint16_t current_cnt = __HAL_TIM_GET_COUNTER(&htim4);
-
-      if (current_cnt > DAC_COUNT && current_cnt <= 4500)
-      {
-        counter = DAC_COUNT;
-        __HAL_TIM_SET_COUNTER(&htim4, DAC_COUNT);
-      }
-      else if (current_cnt > 4501 && current_cnt <= 5000)
-      {
-        counter = 0;
-        __HAL_TIM_SET_COUNTER(&htim4, 0);
-      }
-      else
-      {
-        counter = current_cnt;
-      }
-
-      float dac_voltage = (float)counter * MIN_DAC;
-
-      if (!DAC_CHANNEL_FLAG) {
-        DAC_Set_Voltage(DAC_CHANNEL_1, 2,dac_voltage);
-      }else {
-        DAC_Set_Voltage(DAC_CHANNEL_2,1 ,dac_voltage);
-      }
-
-      snprintf(buff, sizeof(buff), "current_cnt: %d\r\n", current_cnt);
-      HAL_UART_Transmit(&huart1, (uint8_t *)buff, strlen(buff), 10);
-    }
-
-
-    DAC_Set_Voltage(DAC_CHANNEL_1,1, 2.3f);
-    BUCK_Enable();
-    //==============旋转编码器=============//
-    if (HAL_GPIO_ReadPin(ENC_SW_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET) {
-      HAL_Delay(20);
-      if (HAL_GPIO_ReadPin(ENC_SW_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET) {
-        DAC_CHANNEL_FLAG = !DAC_CHANNEL_FLAG;
-        while (HAL_GPIO_ReadPin(ENC_SW_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET);
-        HAL_Delay(20);
-      }
-    }
-
-
-
+    ENC_SW();
+    ADC_Calculate();
+    Encoder_Process();
+    BUCK_Key1_Process();
     if (HAL_GetTick() - last_tick >= SEND_TIME) {
       last_tick = HAL_GetTick();
-
-      // 从 32 位同步数据中拆分出 16 位的 ADC 原始值
-      ADC1_CH1 = (uint16_t)(adc_ui_original[0] & 0xFFFF);          // ADC1 第1通道 (PA1)
-      ADC2_CH1 = (uint16_t)((adc_ui_original[0] >> 16) & 0xFFFF);  // ADC2 第1通道 (PA0)
-      ADC1_CH2 = (uint16_t)(adc_ui_original[1] & 0xFFFF);          // ADC1 第2通道 (PB0)
-
-      // 统一转换为真实的物理引脚电压值 (0 - 3300 mV)
-      uint32_t VOUT_P = (((uint32_t)ADC1_CH1 * 3300) / 4095)*11;
-      uint32_t VOUT_N = (((uint32_t)ADC2_CH1 * 3300) / 4095)*11;
-      uint32_t Vsense = ((uint32_t)ADC1_CH2 * 3300) / 4095;
-
-      int I_actual = Vsense / Rs;
-      int Vload = VOUT_P - VOUT_N;
-      int VMOS = VOUT_N - Vsense;
-      int RLOAD = Vload/I_actual;
-
-      // 串口一次性输出 3 个通道的真实电压值
-      char msg[256];
-      snprintf(msg, sizeof(msg),
-         "--------------------------------------------------\r\n"
-         "VOUT_P: %4lu mV | VOUT_N: %4lu mV | Vsense: %4lu mV\r\n"
-         "Vload : %d mV | VMOS  : %d mV\r\n"
-         "I_actual: %d mA | RLOAD : %d Ohm\r\n",
-         VOUT_P, VOUT_N, Vsense, Vload, VMOS, I_actual, RLOAD);
-      HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 50);
+      ADC_OUTPUT();
+      DAC_OUTPUT();
     }
     /* USER CODE END WHILE */
 
@@ -269,17 +194,6 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-//=============按键中断==============//
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-  if (GPIO_Pin == KEY_3_Pin)
-  {
-    if (HAL_GPIO_ReadPin(KEY_3_GPIO_Port, KEY_3_Pin) == GPIO_PIN_RESET)
-    {
-      Safe_Off();
-    }
-  }
-}
 /* USER CODE END 4 */
 
 /**
