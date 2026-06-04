@@ -13,6 +13,8 @@
  * - 负载电阻输入 mOhm，屏幕 x1 显示 Ohm，保留 2 位小数。
  * - 负载电压输入 mV，屏幕 x2 显示 V，保留 2 位小数。
  * - 负载功率输入 mW，屏幕 x3 显示 W，保留 2 位小数。
+ * - 电流波形 s0 通道 0 显示设定电流，通道 1 显示实际电流。
+ *   波形按 0~500 mA 映射到曲线控件 0~255 的数据范围。
  *
  * 报警声音：
  * 当保护状态切换到“过流 / 短路限流 / 开路报警”时，本库会发送 beep 指令。
@@ -42,6 +44,7 @@
 #define TJC_OBJ_LOAD_VOLTAGE    "x2"
 #define TJC_OBJ_LOAD_POWER      "x3"
 #define TJC_OBJ_OVERCURRENT     "n1"
+#define TJC_OBJ_CURRENT_WAVE    "s0"
 
 #define TJC_BEEP_SHORT_LIMIT_MS 200
 #define TJC_BEEP_OPEN_LOAD_MS   400
@@ -49,6 +52,11 @@
 
 #define TJC_COLOR_BLACK 0
 #define TJC_COLOR_RED   63488
+
+#define TJC_CURRENT_WAVE_SET_CH    0
+#define TJC_CURRENT_WAVE_ACTUAL_CH 1
+#define TJC_CURRENT_WAVE_MAX_MA    500
+#define TJC_WAVE_VALUE_MAX         255
 
 // 默认使用 USART2 连接串口屏：PA2(TX) -> 屏幕 RX，PA3(RX) -> 屏幕 TX。
 static UART_HandleTypeDef *tjc_uart = &huart2;
@@ -136,6 +144,22 @@ static int32_t TJC_RoundDivI32(int64_t numerator, int32_t denominator)
         return (int32_t)((numerator + denominator / 2) / denominator);
     }
     return (int32_t)((numerator - denominator / 2) / denominator);
+}
+
+/**
+ * @brief  将电流值映射到曲线控件的数据范围 0~255。
+ * @param  current_uA 电流，单位 uA。
+ * @retval 曲线控件点值。
+ */
+static uint8_t TJC_CurrentToWaveValue_uA(int32_t current_uA)
+{
+    int32_t value;
+
+    current_uA = TJC_ClampI32(current_uA, 0, TJC_CURRENT_WAVE_MAX_MA * 1000);
+    value = TJC_RoundDivI32((int64_t)current_uA * TJC_WAVE_VALUE_MAX,
+                            TJC_CURRENT_WAVE_MAX_MA * 1000);
+    value = TJC_ClampI32(value, 0, TJC_WAVE_VALUE_MAX);
+    return (uint8_t)value;
 }
 
 /**
@@ -281,6 +305,26 @@ HAL_StatusTypeDef TJC_Beep(uint16_t time_ms)
     return TJC_SendCmd(cmd);
 }
 
+/**
+ * @brief  向曲线/波形控件追加一个数据点。
+ * @param  obj     曲线控件名，例如 "s0"。
+ * @param  channel 通道号，从 0 开始。
+ * @param  value   曲线点值，范围 0~255。
+ * @retval HAL 状态码。
+ */
+HAL_StatusTypeDef TJC_AddWavePoint(const char *obj, uint8_t channel, uint8_t value)
+{
+    char cmd[TJC_CMD_BUF_LEN];
+
+    if (obj == NULL) {
+        return HAL_ERROR;
+    }
+
+    snprintf(cmd, sizeof(cmd), "add %s.id,%u,%u",
+             obj, (unsigned int)channel, (unsigned int)value);
+    return TJC_SendCmd(cmd);
+}
+
 
 /******************** 上层函数：恒流源主界面显示封装 ********************/
 
@@ -419,6 +463,22 @@ void TJC_SetOvercurrentThreshold_mA(int32_t threshold_mA)
 {
     threshold_mA = TJC_ClampI32(threshold_mA, 0, 999);
     TJC_SetInt(TJC_OBJ_OVERCURRENT, threshold_mA);
+}
+
+/**
+ * @brief  同步更新设定电流与实际电流波形。
+ * @param  set_current_mA    设定电流，单位 mA，0~500 mA 映射到 0~255。
+ * @param  actual_current_uA 实际电流，单位 uA，0~500 mA 映射到 0~255。
+ */
+void TJC_AddCurrentWavePoint(int32_t set_current_mA, int32_t actual_current_uA)
+{
+    set_current_mA = TJC_ClampI32(set_current_mA, 0, TJC_CURRENT_WAVE_MAX_MA);
+
+    uint8_t set_wave = TJC_CurrentToWaveValue_uA(set_current_mA * 1000);
+    uint8_t actual_wave = TJC_CurrentToWaveValue_uA(actual_current_uA);
+
+    TJC_AddWavePoint(TJC_OBJ_CURRENT_WAVE, TJC_CURRENT_WAVE_SET_CH, set_wave);
+    TJC_AddWavePoint(TJC_OBJ_CURRENT_WAVE, TJC_CURRENT_WAVE_ACTUAL_CH, actual_wave);
 }
 
 /**

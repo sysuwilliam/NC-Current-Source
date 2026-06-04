@@ -15,6 +15,7 @@
  *                        x2  负载电压，单位 V，保留 2 位小数
  *                        x3  负载功率，单位 W，保留 2 位小数
  *                        n1  过流阈值，单位 mA，整数
+ *                        s0  电流波形，通道 0 为设定电流，通道 1 为实际电流
  *
  * 报警声音：
  * 当保护状态写入“过流 / 短路限流 / 开路报警”时，本库会发送 beep 指令让屏幕蜂鸣一次。
@@ -123,6 +124,15 @@ HAL_StatusTypeDef TJC_Page(const char *page_name);
 HAL_StatusTypeDef TJC_Beep(uint16_t time_ms);
 
 /**
+ * @brief  向曲线/波形控件追加一个数据点。
+ * @param  obj     曲线控件名，例如 "s0"。
+ * @param  channel 通道号，从 0 开始。
+ * @param  value   曲线点值，范围 0~255。
+ * @retval HAL 状态码。
+ */
+HAL_StatusTypeDef TJC_AddWavePoint(const char *obj, uint8_t channel, uint8_t value);
+
+/**
  * @brief  设置工作模式显示为“恒流模式”。
  */
 void TJC_SetWorkModeConstCurrent(void);
@@ -174,6 +184,13 @@ void TJC_SetLoadPower_mW(int32_t power_mW);
  * @param  threshold_mA 过流阈值，单位 mA。
  */
 void TJC_SetOvercurrentThreshold_mA(int32_t threshold_mA);
+
+/**
+ * @brief  同步更新设定电流与实际电流波形。
+ * @param  set_current_mA    设定电流，单位 mA，0~500 mA 映射到 0~255。
+ * @param  actual_current_uA 实际电流，单位 uA，0~500 mA 映射到 0~255。
+ */
+void TJC_AddCurrentWavePoint(int32_t set_current_mA, int32_t actual_current_uA);
 
 /**
  * @brief  一次性刷新主界面的所有动态显示量。
