@@ -32,6 +32,8 @@
 #include "ENABLE.h"
 #include "DAC.h"
 #include "DSP_ADC.h"
+#include "communication.h"
+#include "PID.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,6 +58,9 @@
 /* USER CODE BEGIN PV */
 int counter = 0;                    //编码器值
 char buff[50]="";
+float DAC1_Target_voltage = 0.00f;
+float DAC2_Target_voltage = 0.0f;
+volatile float I_target = 0.0f;
 
 /* USER CODE END PV */
 
@@ -108,6 +113,7 @@ int main(void)
   MX_TIM4_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+  BUCK_USART1_InitRx();
   ADC_Init(); // 开启ADC采样。
 
   DAC_Init(&hspi1);       //初始化DAC
@@ -120,10 +126,6 @@ int main(void)
   uint32_t last_tick_buff = HAL_GetTick();
   int16_t last_counter = -1;
 
-  for (int counter = 0; counter < 10; counter++) {
-    HAL_Delay(100);
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -134,6 +136,9 @@ int main(void)
     ADC_Calculate();
     Encoder_Process();
     BUCK_Key1_Process();
+    Key2_Process();
+    Uart_Command_Parser();
+    // BUCK_USART1_ParseStringCommand();
     if (HAL_GetTick() - last_tick >= SEND_TIME) {
       last_tick = HAL_GetTick();
       ADC_OUTPUT();

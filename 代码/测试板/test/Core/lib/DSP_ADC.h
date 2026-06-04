@@ -8,6 +8,7 @@
 #include "main.h"
 
 #define Rs 2000            //采样电阻2000毫欧
+extern int32_t I_actual;
 
 void ADC_Init(void);
 void ADC_Calculate(void);

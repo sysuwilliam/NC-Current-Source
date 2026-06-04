@@ -28,4 +28,5 @@ void Safe_Init (void);
 void Encoder_Process(void);
 void DAC_OUTPUT(void);
 void ENC_SW(void);
+void Key2_Process(void);
 #endif //INC_2026_5_4_ENABLE_H

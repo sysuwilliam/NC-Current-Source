@@ -16,11 +16,16 @@ static volatile uint8_t key2_state = KEY2_STATE_IDLE; //volatile修饰在中断�
 static volatile uint32_t KEY2_EXIT_DOWN_TIME = 0;
 
 static uint16_t last_encoder_cnt = 0;
-float DAC1_Target_voltage = 1.67f;
-float DAC2_Target_voltage = 0.2f;
 
+static const float sg_vol_step_table[5] = {0.001f, 0.01f, 0.1f, 1.0f,0.0005f};
 float VOL_STEP = 0.01f;
-uint8_t VOL_STEP_flag = 1;
+static uint8_t VOL_STEP_flag = 1;
+
+static const float sg_I_step_table[5] = {0.001f, 0.01f, 0.1f, 1.0f,0.0001f};
+float I_STEP = 0.01f;
+static uint8_t I_STEP_flag = 1;
+
+
 
 uint8_t DAC_CHANNEL_FLAG = SW_DAC_CHANNEL_1;
 
@@ -46,13 +51,24 @@ void Delay_us_Block(uint32_t us)
 /**
  * @brief  关断
  */
-// void Safe_Off(void) {
-//     DAC_Set_Voltage(DAC_CHANNEL_2,1, 0);
-//     Delay_us_Block(20000);
-//     HAL_GPIO_WritePin(SW_IN_GPIO_Port, SW_IN_Pin,GPIO_PIN_RESET);
-//     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin,GPIO_PIN_SET);
-//     HAL_GPIO_WritePin(BUCK_EN_GPIO_Port, BUCK_EN_Pin,GPIO_PIN_RESET);
-// }
+void Safe_Off(void) {
+    Delay_us_Block(20000);
+    // VOL_STEP_flag++;
+    // if (VOL_STEP_flag >= 5)
+    // {
+    //     VOL_STEP_flag = 0; // 环形回绕
+    // }
+    // // 改变唯一物理账本：步进值
+    // VOL_STEP = sg_vol_step_table[VOL_STEP_flag];
+
+    I_STEP_flag++;
+    if (I_STEP_flag >= 5)
+    {
+        I_STEP_flag = 0; // 环形回绕
+    }
+    // 改变唯一物理账本：步进值
+    I_STEP = sg_I_step_table[I_STEP_flag];
+}
 
 /**
  * @brief  外部中断回调函数
@@ -71,16 +87,15 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             KEY1_EXIT_DOWN_TIME = HAL_GetTick();   // 记住按下时的时间
             key_state = KEY1_STATE_DOWN;  // 唤醒主循环中的状态机
         }
-    }else if (GPIO_Pin == KEY_3_Pin)
-    {
+    }else if (GPIO_Pin == KEY_3_Pin) {
         if (HAL_GPIO_ReadPin(KEY_3_GPIO_Port, KEY_3_Pin) == GPIO_PIN_RESET)
         {
-            //Safe_Off();
+            Safe_Off();
         }
     }else if (GPIO_Pin == KEY_2_Pin)
     {
-        // 当前状态机正处于空闲
-        if (key2_state == KEY1_STATE_IDLE)
+        //当前状态机正处于空闲
+        if (key2_state == KEY2_STATE_IDLE)
         {
             // 关闭当前引脚的外部中断
             __HAL_GPIO_EXTI_CLEAR_IT(KEY_2_Pin);
@@ -153,20 +168,13 @@ void Key2_Process(void)
                 if (HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET)
                 {
                     // 20ms 后依然是低电平，说明已经按下，进入功能态
-                    if (VOL_STEP_flag<3) {
-                        VOL_STEP =VOL_STEP * 10;
-                        VOL_STEP_flag++;
-                    }else if (VOL_STEP_flag>=3) {
-                        VOL_STEP_flag = 0;
-                        VOL_STEP = 0.001f;
-                    }
 
-                    key_state = KEY2_STATE_UP; // 检测是否抬起
+                    key2_state = KEY2_STATE_UP; // 检测是否抬起
                 }
                 else
                 {
                     // 20ms 后变高电平了，说明是环境干扰，直接复位
-                    key_state = KEY2_STATE_IDLE;
+                    key2_state = KEY2_STATE_IDLE;
                     __HAL_GPIO_EXTI_CLEAR_IT(KEY_2_Pin);
                     HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); // 重新开启外部中断
                 }
@@ -177,11 +185,12 @@ void Key2_Process(void)
             if (HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_SET)
             {
                 // 手松开
-                key_state = KEY2_STATE_IDLE;          // 回归最初的空闲态
+                key2_state = KEY2_STATE_IDLE;          // 回归最初的空闲态
                 __HAL_GPIO_EXTI_CLEAR_IT(KEY_2_Pin);  // 清除松手瞬间可能产生的后沿毛刺
                 HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);   // 等待下一次按下
             }
             break;
+
 
         default:
             break;
@@ -230,7 +239,7 @@ void Encoder_Process(void)
         switch (DAC_CHANNEL_FLAG)
         {
             case DAC_CHANNEL_1:
-                DAC1_Target_voltage -= (float)delta * VOL_STEP ;
+                DAC1_Target_voltage -= (float)delta * I_STEP ;
                 if (DAC1_Target_voltage <= 0 ) {
                     DAC1_Target_voltage = 0;
                 } else if (DAC1_Target_voltage >= 3.3f) {
@@ -240,11 +249,12 @@ void Encoder_Process(void)
                 break;
 
             case DAC_CHANNEL_2:
-                DAC2_Target_voltage -= (float)delta * VOL_STEP ;
+                I_target -= (float)delta * VOL_STEP ;
+                DAC2_Target_voltage = (I_target - 1.3684f) / 0.49819f;
                 if (DAC2_Target_voltage <= 0 ) {
                     DAC2_Target_voltage = 0;
-                } else if (DAC2_Target_voltage >= 1.3f) {
-                    DAC2_Target_voltage = 1.3f;
+                } else if (DAC2_Target_voltage >= 1.4f) {
+                    DAC2_Target_voltage = 1.4f;
                 }
                 DAC_Set_Voltage(DAC_CHANNEL_2, DAC_GAIN_1X, DAC2_Target_voltage);
                 break;

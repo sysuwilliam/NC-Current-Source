@@ -49,16 +49,34 @@ void ADC_Calculate(void) {
     local_buf[1] = adc_ui_original[1];
     __enable_irq();
 
-    //  提取原始的 12 位 ADC 寄存器值 (0 - 4095)
+    // 1. 提取原始的 12 位 ADC 寄存器值 (0 - 4095)
     uint32_t raw_adc_P = (uint32_t)(local_buf[0] & 0xFFFF);
     uint32_t raw_adc_N = (uint32_t)((local_buf[0] >> 16) & 0xFFFF);
     uint32_t raw_adc_S = (uint32_t)(local_buf[1] & 0xFFFF);
 
-    // 电压通道计算（转换为 mV ）
-    uint32_t calc_VOUT_P = (raw_adc_P * 3300 * 11) / 4095;
-    uint32_t calc_VOUT_N = (raw_adc_N * 3300 * 11) / 4095;
-    uint32_t calc_Vsense = (raw_adc_S * 3300) / 4095;
+    // 2. 理想理论模型计算（转换为原始 mV ）
+    uint32_t calc_VOUT_P_raw = (raw_adc_P * 3300 * 11) / 4095;
+    uint32_t calc_VOUT_N_raw = (raw_adc_N * 3300 * 11) / 4095;
+    uint32_t calc_Vsense_raw = (raw_adc_S * 3300) / 4095;
 
+    /*-----------------------------------------------------------------
+     * 【强制纠偏机制】：植入真实环境校准曲线 (防止显示偏高/偏低)
+     * 使用 uint64_t 放大系数防整型截断，最后加上/减去系统偏置
+     *----------------------------------------------------------------*/
+    uint32_t calc_VOUT_P = (uint32_t)(((uint64_t)calc_VOUT_P_raw * 985864ULL) / 1000000ULL) + 2;
+
+    uint32_t calc_VOUT_N = 0;
+    uint64_t vout_n_scaled = ((uint64_t)calc_VOUT_N_raw * 998639ULL) / 1000000ULL;
+    if (vout_n_scaled > 27) {
+        calc_VOUT_N = (uint32_t)(vout_n_scaled - 27);
+    } else {
+        calc_VOUT_N = 0; // 防止负溢出卡死
+    }
+
+    // Vsense 直接参与恒流环不改变原始物理意义，此处保持原样
+    uint32_t calc_Vsense = calc_Vsense_raw;
+
+    // 3. 一阶低通滤波架设
     static uint8_t is_first_run = 1;
     if (is_first_run) {
         VOUT_P = calc_VOUT_P;
@@ -70,19 +88,14 @@ void ADC_Calculate(void) {
         Vsense = Vsense + (uint32_t)(((int32_t)calc_Vsense - (int32_t)Vsense) >> LPF_SHIFT);
     }
 
+    // 4. 计算外部主链路真实压差
     Vload = (int32_t)VOUT_P - (int32_t)VOUT_N;
     VMOS  = (int32_t)VOUT_N - (int32_t)Vsense;
 
-    /* * 直接利用原始 ADC 阶梯值计算高精度电流 (uA)
-     * 理论公式：I(uA) = (ADC * 3300 / 4095) * 1000000 / Rs(mOhm)
-     * 变换顺序，先乘后除：I(uA) = (ADC * 3,300,000,000) / (4095 * Rs)
-     * * 为防止 33 亿乘以 ADC 导致 uint64_t 溢出，必须转换类型。
-     * 最大值：4095 * 3,300,000,000 = 13,513,500,000,000 (远小于 uint64_t 的 1.8x10^19)
-     */
+    // 5. 电流高精度原始 uA 计算
     uint64_t current_uA_raw = ((uint64_t)raw_adc_S * 3300000000ULL) / (4095ULL * Rs);
 
-    // 对高精度电流实施一阶低通滤波
-    // 通过 LPF 的右移机制，原本处于硬件离散阶梯之间的噪声，会被均值化为真正的“小数点后小数位”
+    // 6. 核心电流低通滤波
     if (is_first_run) {
         filter_I_actual_uA = current_uA_raw;
         is_first_run = 0;
@@ -90,15 +103,23 @@ void ADC_Calculate(void) {
         filter_I_actual_uA = filter_I_actual_uA + (((int64_t)current_uA_raw - (int64_t)filter_I_actual_uA) >> LPF_SHIFT);
     }
 
-    I_actual = (int32_t)filter_I_actual_uA;
+    /*-----------------------------------------------------------------
+     * 【数据对齐修改】：对滤波后的高精度电流进行“显示链路校准拦截”
+     * 消除 I_serial 明显偏高的问题，使串口数据向标准仪表靠拢
+     *----------------------------------------------------------------*/
+    int32_t I_actual_raw = (int32_t)filter_I_actual_uA;
 
-    // 5. 阈值滤波与小信号卡死
-    if (I_actual < 500) { // 小于 0.5 mA
+    // 注入拟合公式: I_calibrated = I_raw * 0.98022 + 23 uA
+    I_actual = (int32_t)(((int64_t)I_actual_raw * 98022LL) / 100000LL) + 23;
+
+    // 7. 阈值拦截与小信号卡死
+    if (I_actual < 500) { // 小于 500 uA (0.5 mA)
         I_actual = 0;
         RLOAD = 0;
     } else {
-        // 动态电阻高精度计算
-        RLOAD = (int32_t)(((uint64_t)Vload * 1000000) / (uint32_t)I_actual);
+        // 动态电阻高精度计算 (利用校准后的 Vload 和 I_actual)
+        // 计算结果单位为 mOhm
+        RLOAD = (int32_t)(((uint64_t)Vload * 1000000ULL) / (uint32_t)I_actual);
     }
 }
 
