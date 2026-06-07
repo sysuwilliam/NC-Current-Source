@@ -1,0 +1,152 @@
+//
+// Created by lin on 2026/6/4.
+//
+
+#include "PID.h"
+#include <stdlib.h>
+#include "main.h"
+#include "dsp_ADC.h"
+#include "global_value.h"
+#include "dsp_DAC.h"
+
+
+// 实例化全局变量
+PID_Controller_t pid_current;
+
+/*卡尔曼滤波*/
+// 初始化卡尔曼参数
+Kalman_Scalar_t kalman_v_p = {
+    .x_last = 0.0f,
+    .EST_last = 1.0f,   // 不为0即可
+    .Q = 0.001f,      //
+    .MEA = 0.05f        // 根据你ADC跳动范围来定（比如跳动幅度的方差）
+};
+
+Kalman_Scalar_t kalman_v_n = {
+    .x_last = 0.0f,
+    .EST_last = 1.0f,   // 不为0即可
+    .Q = 0.001f,      //
+    .MEA = 0.05f        // 根据ADC跳动范围来定（比如跳动幅度的方差）
+};
+
+Kalman_Scalar_t kalman_v_s = {
+    .x_last = 0.0f,
+    .EST_last = 1.0f,   // 不为0即可
+    .Q = 0.001f,      //
+    .MEA = 0.05f        // 根据你ADC跳动范围来定（比如跳动幅度的方差）
+};
+
+
+float VOUTP_Middle;
+float VOUTN_Middle;
+float Vsence_Middle;
+float I_Middle;
+
+/**
+ * @brief  系统级高精度采样与滤波总调度任务 (纠偏规整版)
+ * @note   在主循环 while(1) 中调用。引入物理时序防线，彻底消除高频重复读取导致的滤波退化。
+ */
+void Filter_Output(void) {
+    uint32_t r_p = 0, r_n = 0, r_s = 0;
+    // 1.读取
+    ADC_Raw_Read(&r_p, &r_n, &r_s);
+    /*-----------------------------------------------------------------
+     * 2. 换算
+     *----------------------------------------------------------------*/
+    float raw_P = (float) r_p * (3.3f / 4095.0f);
+    float raw_N = (float) r_n * (3.3f / 4095.0f);
+    float raw_S = (float) r_s * (3.3f / 4095.0f);
+
+    /*-----------------------------------------------------------------
+     * 3. 滤波
+     *----------------------------------------------------------------*/
+    VOUTP_Middle = KalmanFilter(&kalman_v_p, raw_P);
+    // VOUTP_adc = (VOUTP_Middle * 0.985864f *11.0f) + 0.001825f;
+    VOUTP_adc = VOUTP_Middle * 11.0f;
+
+    VOUTN_Middle = KalmanFilter(&kalman_v_n, raw_N);
+    // VOUTN_adc = (VOUTN_Middle * 0.998639f *11.0f) + 0.026753f;
+    VOUTN_adc = VOUTN_Middle * 11.0f;
+
+    Vsence_Middle = KalmanFilter(&kalman_v_s, raw_S);
+    Vsence_adc = Vsence_Middle;
+
+    /*-----------------------------------------------------------------
+     * 4. 核心物理账本刷新
+     *----------------------------------------------------------------*/
+    Vmos = VOUTN_adc - Vsence_adc;
+    I_Middle = Vsence_adc / Rs;
+    // I_disp = (I_Middle * 0.98022f) + 0.023329f;
+    I_disp = I_Middle + (4.821f - 0.01811f * I_Middle * 1000) / 1000.0f; // 线性补偿修正，消除死区误差
+    if (I_disp > 0.6f) {
+        I_disp = I_Middle; 
+    }
+}
+
+
+/**
+ * @brief  PID 参数初始化
+ * 修改点：目标值转换引入 PID_CURRENT_SCALE 宏，消除硬编码数字
+ */
+void PID_Init(void)
+{
+    // 严格对齐 2000 倍标度的物理阻尼参数
+    pid_current.Kp = 0.0005f;
+    pid_current.Ki = 0.00025f;
+    pid_current.Kd = 0.0f;
+
+    pid_current.target = (int32_t)(I_set * PID_CURRENT_SCALE);
+    pid_current.actual = 0;
+
+    pid_current.err_curr = 0;
+    pid_current.err_last1 = 0;
+    pid_current.err_last2 = 0;
+    pid_current.out_delta = 0.0f;
+}
+
+/**
+ * @brief  电流环 PID 增量式核心计算
+ * 修改点：全面应用 PID_CURRENT_SCALE 和 PID_CURRENT_DEADBAND 宏，实现业务与参数解耦
+ */
+
+void PID_Current_Loop(void)
+{
+    // 1. 同步当前最新的全局变量，精度为1/2000.
+    pid_current.target = (int32_t)(I_set * PID_CURRENT_SCALE);
+    pid_current.actual = (int32_t)(I_disp * PID_CURRENT_SCALE);
+
+    // 2. 计算当前误差 E(n) (0.5mA)
+    pid_current.err_curr = pid_current.target - pid_current.actual;
+
+    /* ======= 3. 工业级死区控制（防微幅震荡干扰） ======= */
+    // 使用死区宏进行边界拦截，低于死区阈值则判定误差为0
+    if (abs(pid_current.err_curr) < PID_CURRENT_DEADBAND)
+    {
+        pid_current.err_curr = 0;
+    }
+
+    /* ======= 4. 标准增量式 PID  ======= */
+    pid_current.out_delta = (pid_current.Kp * (float)(pid_current.err_curr - pid_current.err_last1)) +
+                            (pid_current.Ki * (float)pid_current.err_curr) +
+                            (pid_current.Kd * (float)(pid_current.err_curr - 2 * pid_current.err_last1 + pid_current.err_last2));
+
+    /* ======= 5. 作用于外设：改变 DAC2 目标控制量 ======= */
+    DAC2_cmd += pid_current.out_delta;
+
+    /* ======= 6. 强制纠偏：硬件防御边界拦截（红线保护） ======= */
+    if (DAC2_cmd <= 0.0f)
+    {
+        DAC2_cmd = 0.0f;
+    }
+    else if (DAC2_cmd >= 1.4f)
+    {
+        DAC2_cmd = 1.4f;
+    }
+
+    // 7. 物理刷新硬件
+    DAC_Set_Voltage(DAC_CHANNEL_2, DAC_GAIN_1X, DAC2_cmd);
+
+    // 8. 滚动的状态历史记录前移
+    pid_current.err_last2 = pid_current.err_last1;
+    pid_current.err_last1 = pid_current.err_curr;
+}
