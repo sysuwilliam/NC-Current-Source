@@ -3,6 +3,8 @@
 //
 
 #include "PID.h"
+
+#include <complex.h>
 #include <stdlib.h>
 #include "main.h"
 #include "dsp_ADC.h"
@@ -19,13 +21,18 @@ static uint16_t sample_box_p[NA];
 static uint16_t sample_box_n[NA];
 static uint16_t sample_box_s[NA];
 
-/*卡尔曼滤波*/
-// 初始化卡尔曼参数
+//============中间计算量============//
+float VOUTP_Middle;
+float VOUTN_Middle;
+float Vsence_Middle;
+float I_Middle;
+
+
 Kalman_Scalar_t kalman_v_p = {
     .x_last = 0.0f,
     .EST_last = 1.0f,   // 不为0即可
     .Q = 0.001f,      //
-    .MEA = 0.05f        // 根据你ADC跳动范围来定（比如跳动幅度的方差）
+    .MEA = 0.05f        // 根据ADC跳动范围来定（比如跳动幅度的方差）
 };
 
 Kalman_Scalar_t kalman_v_n = {
@@ -39,14 +46,19 @@ Kalman_Scalar_t kalman_v_s = {
     .x_last = 0.0f,
     .EST_last = 1.0f,   // 不为0即可
     .Q = 0.001f,      //
-    .MEA = 0.05f        // 根据你ADC跳动范围来定（比如跳动幅度的方差）
+    .MEA = 0.05f        // 根据ADC跳动范围来定（比如跳动幅度的方差）
 };
 
+/*卡尔曼滤波*/
+// 在设定电流改变时重置卡尔曼参数
+void Kalman_init(void) {
+    kalman_v_s.x_last        = I_set * Rs;
+    kalman_v_s.EST_last      = 0.5f;
 
-float VOUTP_Middle;
-float VOUTN_Middle;
-float Vsence_Middle;
-float I_Middle;
+
+}
+
+
 
 /**
  * @brief  系统级高精度采样与滤波总调度任务 (纠偏规整版)
@@ -54,33 +66,64 @@ float I_Middle;
  */
 void Filter_Output(void) {
     uint32_t r_p = 0, r_n = 0, r_s = 0;
+    static uint8_t Filter_count = 0;
     // 1.读取
     ADC_Raw_Read(&r_p, &r_n, &r_s);
+    sample_box_p[Filter_count]=r_p;
+    sample_box_n[Filter_count]=r_n;
+    sample_box_s[Filter_count]=r_s;
+    Filter_count++;
     /*-----------------------------------------------------------------
-     * 2. 换算
+     * 2. 先均值滤波再换算
      *----------------------------------------------------------------*/
-    float raw_P = (float) r_p * (3.3f / 4095.0f);
-    float raw_N = (float) r_n * (3.3f / 4095.0f);
-    float raw_S = (float) r_s * (3.3f / 4095.0f);
+    if (Filter_count < NA) {
+        return;
+    }
+    Filter_count=0;
+
+
+    float raw_P = (float) GetADC_Average_Engine(sample_box_p)* (3.3f / 4095.0f);
+    float raw_N = (float) GetADC_Average_Engine(sample_box_n) * (3.3f / 4095.0f);
+    float raw_S = (float) GetADC_Average_Engine(sample_box_s) * (3.3f / 4095.0f);
 
     /*-----------------------------------------------------------------
      * 3. 滤波
      *----------------------------------------------------------------*/
     VOUTP_Middle = KalmanFilter(&kalman_v_p, raw_P);
-    VOUTP_adc = (VOUTP_Middle * 0.985864f *11.0f) + 0.001825f;
-
     VOUTN_Middle = KalmanFilter(&kalman_v_n, raw_N);
-    VOUTN_adc = (VOUTN_Middle * 0.998639f *11.0f) + 0.026753f;
-
     Vsence_Middle = KalmanFilter(&kalman_v_s, raw_S);
-    Vsence_adc = Vsence_Middle;
 
     /*-----------------------------------------------------------------
      * 4. 核心物理账本刷新
      *----------------------------------------------------------------*/
+
+    //===========负载电压============//
+    if (VOUTP_Middle < 0.001f) {
+        VOUTP_adc = 0.0f;
+        return;
+    }
+    if (VOUTN_Middle < 0.001f) {
+        VOUTN_adc = 0.0f;
+        return;
+    }
+    //VOUTP_adc = (VOUTP_Middle * 0.985864f *11.0f) + 0.001825f;
+    VOUTP_adc = VOUTP_Middle * 11.0f;
+    //VOUTN_adc = (VOUTN_Middle * 0.998639f *11.0f) + 0.026753f;
+    VOUTN_adc = VOUTN_Middle * 11.0f;
+
+    //===========mos管电压===========//
     Vmos = VOUTN_adc - Vsence_adc;
+
+    //===========实际电流============//
+    Vsence_adc = Vsence_Middle;
+
     I_Middle = Vsence_adc / Rs;
-    I_disp = (I_Middle * 0.98022f) + 0.023329f;
+    //I_disp = (I_Middle * 0.98022f) + 0.023329f;
+    if (I_Middle < 0.001f) {
+        I_disp = 0.0f;
+        return;
+    }
+    I_disp = I_Middle+(4.821f-0.01811f*I_Middle);
 }
 
 
@@ -88,7 +131,7 @@ void Filter_Output(void) {
  * @brief  PID 参数初始化
  * 修改点：目标值转换引入 PID_CURRENT_SCALE 宏，消除硬编码数字
  */
-void BUCK_PID_Init(void)
+void PID_Init(void)
 {
     // 严格对齐 2000 倍标度的物理阻尼参数
     pid_current.Kp = 0.0005f;
@@ -109,7 +152,7 @@ void BUCK_PID_Init(void)
  * 修改点：全面应用 PID_CURRENT_SCALE 和 PID_CURRENT_DEADBAND 宏，实现业务与参数解耦
  */
 
-void BUCK_PID_Current_Loop(void)
+void PID_Current_Loop(void)
 {
     // 1. 同步当前最新的全局变量，精度为1/2000.
     pid_current.target = (int32_t)(I_set * PID_CURRENT_SCALE);

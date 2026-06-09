@@ -33,6 +33,7 @@
 #include "key_service.h"
 #include "PID.h"
 #include "dsp_ADC.h"
+#include "global_value.h"
 #include "TJC_HMI.h"
 /* USER CODE END Includes */
 
@@ -116,6 +117,7 @@ int main(void)
   HAL_Delay(20);
 
   uint32_t last_tick = HAL_GetTick();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */

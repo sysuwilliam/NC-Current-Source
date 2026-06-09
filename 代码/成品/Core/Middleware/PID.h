@@ -44,4 +44,5 @@ typedef struct {
 void PID_Init(void);
 void PID_Current_Loop(void);
 void Filter_Output(void);
+void Kalman_init(void);
 #endif //CI_SOURCE_FINISHED_PID_H

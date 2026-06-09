@@ -7,16 +7,16 @@
 #include "stdint.h"
 
 /*均值滤波*/
-#define NA    300     // 采样次数
-#define BAN  100     // 舍弃数据个数
+#define NA    20     // 采样次数
+#define BAN  8     // 舍弃数据个数
 
 /*卡尔曼滤波*/
 typedef struct {
-    float x_last;    // 上一次的估计值X
+    float x_last;      // 上一次的估计值X
     float EST_last;    // 上一次的估计误差eEST
-    float Q;         // 噪声误差
+    float Q;           // 噪声误差
     float MEA;         // 测量误差：ADC读取的值与实际值存在的误差范围
-    float kg;        // 卡尔曼增益，通过公式可计算
+    float kg;          // 卡尔曼增益，通过公式可计算
 } Kalman_Scalar_t;
 
 

@@ -8,6 +8,7 @@
 #include "dsp_DAC.h"
 #include "tim.h"
 #include "global_value.h"
+#include "PID.h"
 
 /* 搬迁过来的物理账本变量 */
 float I_STEP = 0.01f;
@@ -107,13 +108,12 @@ void Encoder_Process(void) {
                  */
                 I_set -= (float) delta * I_STEP;
 
-                /* * 【边界纠偏】：硬件最大功率红线为 1200mA (1.2A)。
-                 * 严禁放任账本开到 500A，必须严格锁死在 1.2A 以免烧毁功率 MOS 管。
-                 */
+                Kalman_init();
+
                 if (I_set < 0.0f) {
                     I_set = 0.0f;
-                } else if (I_set > 1.2f) {
-                    I_set = 1.2f;
+                } else if (I_set > 0.55f) {
+                    I_set = 0.55f;
                 }
 
                 /* * 【核心纠偏机制】：单位强制对齐
@@ -151,16 +151,5 @@ void Encoder_Process(void) {
     }
 }
 
-// void DAC_SW_CH(void){
-//     if (HAL_GPIO_ReadPin(ENC_SW_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET) {
-//         HAL_Delay(20);
-//         if (HAL_GPIO_ReadPin(ENC_SW_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET) {
-//             DAC_CHANNEL_FLAG=!DAC_CHANNEL_FLAG;
-//             //HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-//             while (HAL_GPIO_ReadPin(ENC_SW_GPIO_Port, ENC_SW_Pin) == GPIO_PIN_RESET);
-//             HAL_Delay(20);
-//         }
-//     }
-// }
 
 
