@@ -1,6 +1,8 @@
 # Editor / IDE
 .history/
 .idea/
+.codeartsdoer/
+.arts/
 .vscode/
 .vs/
 .settings/

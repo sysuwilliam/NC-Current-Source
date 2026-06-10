@@ -128,6 +128,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    TJC_HMI_Process();
     Button_Process();
     Encoder_Process();
     Filter_Output();
