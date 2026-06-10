@@ -10,6 +10,12 @@
 #include "dsp_DAC.h"
 
 
+/*均值滤波*/
+// 为 连续采样开辟的独立通道物理数组（保持静态全局区分配，防栈溢出）
+static uint16_t sample_box_p[NA];
+static uint16_t sample_box_n[NA];
+static uint16_t sample_box_s[NA];
+
 // 实例化全局变量
 PID_Controller_t pid_current;
 
@@ -48,36 +54,72 @@ float I_Middle;
  */
 void Filter_Output(void) {
     uint32_t r_p = 0, r_n = 0, r_s = 0;
+    static uint8_t Filter_count = 0;
     // 1.读取
     ADC_Raw_Read(&r_p, &r_n, &r_s);
+    sample_box_p[Filter_count]=r_p;
+    sample_box_n[Filter_count]=r_n;
+    sample_box_s[Filter_count]=r_s;
+    Filter_count++;
     /*-----------------------------------------------------------------
-     * 2. 换算
+     * 2. 先均值滤波再换算
      *----------------------------------------------------------------*/
-    float raw_P = (float) r_p * (3.3f / 4095.0f);
-    float raw_N = (float) r_n * (3.3f / 4095.0f);
-    float raw_S = (float) r_s * (3.3f / 4095.0f);
+    if (Filter_count < NA) {
+        return;
+    }
+    Filter_count=0;
+
+
+    float raw_P = (float) GetADC_Average_Engine(sample_box_p)* (3.3f / 4095.0f);
+    float raw_N = (float) GetADC_Average_Engine(sample_box_n) * (3.3f / 4095.0f);
+    float raw_S = (float) GetADC_Average_Engine(sample_box_s) * (3.3f / 4095.0f);
 
     /*-----------------------------------------------------------------
      * 3. 滤波
      *----------------------------------------------------------------*/
     VOUTP_Middle = KalmanFilter(&kalman_v_p, raw_P);
-    // VOUTP_adc = (VOUTP_Middle * 0.985864f *11.0f) + 0.001825f;
-    VOUTP_adc = VOUTP_Middle * 11.0f;
-
     VOUTN_Middle = KalmanFilter(&kalman_v_n, raw_N);
-    // VOUTN_adc = (VOUTN_Middle * 0.998639f *11.0f) + 0.026753f;
-    VOUTN_adc = VOUTN_Middle * 11.0f;
-
     Vsence_Middle = KalmanFilter(&kalman_v_s, raw_S);
-    Vsence_adc = Vsence_Middle;
 
     /*-----------------------------------------------------------------
      * 4. 核心物理账本刷新
      *----------------------------------------------------------------*/
+    //===========负载电压============//
+    if (VOUTP_Middle < 0.001f) {
+        VOUTP_adc = 0.0f;
+        return;
+    }
+    if (VOUTN_Middle < 0.001f) {
+        VOUTN_adc = 0.0f;
+        return;
+    }
+    VOUTP_adc = VOUTP_Middle * 11.0f;
+    VOUTN_adc = VOUTN_Middle * 11.0f;
+    Vsence_adc = Vsence_Middle;
     Vmos = VOUTN_adc - Vsence_adc;
     I_Middle = Vsence_adc / Rs;
     // I_disp = (I_Middle * 0.98022f) + 0.023329f;
+    if (I_Middle < 0.001f) {
+        I_disp = 0.0f;
+        return;
+    }
+    
+    if (0.0f < I_disp && I_disp < 30.0f / 1000) {
+        I_disp = (((I_Middle + (4.821f - 0.01811f * I_Middle * 1000) / 1000.0f) * 1000 * 0.011f + 0.4697f) - 0.25f) / 1000; // 线性补偿修正，消除死区误差
+    } else if (30.0f / 1000 <= I_disp && I_disp < 40.0f / 1000) {
+        I_disp = (((I_Middle + (4.821f - 0.01811f * I_Middle * 1000) / 1000.0f) + 0.47f) - 0.25f) / 1000; // 线性补偿修正，消除死区误差
+    } else if (40.0f / 1000 <= I_disp && I_disp < 50.0f / 1000) {
+        I_disp = (((I_Middle + (4.821f - 0.01811f * I_Middle * 1000) / 1000.0f) + 0.68f) - 0.25f) / 1000; // 线性补偿修正，消除死区误差
+    } else if (50.0f / 1000 <= I_disp && I_disp < 70.0f / 1000) {
+        I_disp = (((I_Middle + (4.821f - 0.01811f * I_Middle * 1000) / 1000.0f) *1000.0f *(-0.0255f) + 1.92f) - 0.25f) / 1000; // 线性补偿修正，消除死区误差
+    } else if (70.0f / 1000 <= I_disp && I_disp < 100.0f / 1000) {
+        I_disp = (((I_Middle + (4.821f - 0.01811f * I_Middle * 1000) / 1000.0f) *1000.0f *(0.0194f) -1.149f) - 0.25f) / 1000; // 线性补偿修正，消除死区误差
+    }
+    
+
+
     I_disp = I_Middle + (4.821f - 0.01811f * I_Middle * 1000) / 1000.0f; // 线性补偿修正，消除死区误差
+    
     if (I_disp > 0.6f) {
         I_disp = I_Middle; 
     }
@@ -91,7 +133,7 @@ void Filter_Output(void) {
 void PID_Init(void)
 {
     // 严格对齐 2000 倍标度的物理阻尼参数
-    pid_current.Kp = 0.0005f;
+    pid_current.Kp = 0.0007f;
     pid_current.Ki = 0.00025f;
     pid_current.Kd = 0.0f;
 
@@ -111,6 +153,13 @@ void PID_Init(void)
 
 void PID_Current_Loop(void)
 {
+static uint8_t Filter_count_P = 0;
+Filter_count_P++;
+    if (Filter_count_P < NA) {
+        return;
+    }
+    Filter_count_P=0;
+
     // 1. 同步当前最新的全局变量，精度为1/2000.
     pid_current.target = (int32_t)(I_set * PID_CURRENT_SCALE);
     pid_current.actual = (int32_t)(I_disp * PID_CURRENT_SCALE);

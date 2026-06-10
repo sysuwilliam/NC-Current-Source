@@ -34,6 +34,7 @@
 #include "PID.h"
 #include "dsp_ADC.h"
 #include "TJC_HMI.h"
+#include "global_value.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,7 +55,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+uint8_t Safe_flag = 0; // 初始化安全标志位为0，表示系统初始状态安全
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -114,6 +115,9 @@ int main(void)
 
   DAC_Init(&hspi1);       //初始化DAC
 
+  I_set = 0.22f;
+  DAC1_Target_voltage = 1.2f;
+
   HAL_TIM_Encoder_Start(&htim4,TIM_CHANNEL_ALL);      //旋转编码器
   HAL_Delay(20);
 
@@ -129,8 +133,19 @@ int main(void)
     Filter_Output();
     PID_Current_Loop();
     if (HAL_GetTick() - last_tick >= SEND_TIME) {
+      if (Safe_flag==0) {
+        Global_OUTPUT();
+      }else if(Safe_flag==1){
+        TJC_Beep(50);
+          TJC_SetLoadVoltage_mV(0);
+          TJC_SetLoadPower_mW(0);
+      }
       last_tick = HAL_GetTick();
-      Global_OUTPUT();
+      if(I_set<0.0001f && HAL_GPIO_ReadPin(BUCK_EN_GPIO_Port, BUCK_EN_Pin) == GPIO_PIN_SET){
+        HAL_GPIO_WritePin(BUCK_EN_GPIO_Port, BUCK_EN_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+          Safe_flag = 1; // 设置安全标志位为1，表示系统状态不安全
+      }
     }
     /* USER CODE END WHILE */
 

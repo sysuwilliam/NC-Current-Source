@@ -27,6 +27,9 @@ static void KEY1_Action(void)
     // KEY1：切换电源开关与指示灯
     HAL_GPIO_TogglePin(BUCK_EN_GPIO_Port, BUCK_EN_Pin);
     HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    if (Safe_flag==1) {
+    Safe_flag = 0; // 恢复安全标志位为0，表示系统状态恢复安全
+    }
 }
 
 static void KEY2_Action(void)

@@ -7,8 +7,8 @@
 #include "stdint.h"
 
 /*均值滤波*/
-#define NA    300     // 采样次数
-#define BAN  100     // 舍弃数据个数
+#define NA    20     // 采样次数
+#define BAN   7    // 舍弃数据个数
 
 /*卡尔曼滤波*/
 typedef struct {
