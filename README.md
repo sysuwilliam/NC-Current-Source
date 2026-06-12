@@ -1,8 +1,7 @@
 <div align="center">
 
-## 高精度数控恒流源
+# 高精度数控恒流源
 
-<hr/>
 
 <p>
   <img src="https://img.shields.io/badge/Team-%E5%81%9A%E7%9A%84%E9%83%BD%E9%98%9F-4b5563?style=for-the-badge" alt="Team 做的都队" />
