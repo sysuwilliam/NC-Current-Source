@@ -55,6 +55,8 @@ void Safe_control(void) {
 
         case TJC_PROTECT_SHORT_LIMIT:
             Global_OUTPUT(TJC_PROTECT_SHORT_LIMIT); //只要输出表示短路。短路依旧正常工作
+            HAL_GPIO_WritePin(BUCK_EN_GPIO_Port, BUCK_EN_Pin, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
             break;
 
         case TJC_PROTECT_NORMAL:
