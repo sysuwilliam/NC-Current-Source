@@ -26,4 +26,4 @@ float Vmos = 0.0f;
 
 uint8_t ADC_FLAG = 0;
 
-TJC_ProtectState_t Safe_flag = TJC_PROTECT_NORMAL;
+TJC_ProtectState_t Safe_flag = TJC_PROTECT_IDLE;

@@ -17,7 +17,7 @@ void Safe_control(void) {
 
     if (I_disp < 0.0001f && HAL_GPIO_ReadPin(BUCK_EN_GPIO_Port, BUCK_EN_Pin) == GPIO_PIN_SET) {
         Open_count++;
-        if (Open_count > 5) {
+        if (Open_count > 10) {
             Safe_flag = TJC_PROTECT_OPEN_LOAD;
             Open_count = 0;
         }

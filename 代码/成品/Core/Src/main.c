@@ -44,7 +44,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SEND_TIME 200  //发送间隔
+#define SEND_TIME 100  //发送间隔
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -115,8 +115,8 @@ int main(void)
 
   DAC_Init(&hspi1);       //初始化DAC
 
-  I_set = 0.22f;
-  DAC1_cmd = 1.2f;
+  I_set = 0.1f;
+  DAC1_cmd = 0.1f;
 
   HAL_TIM_Encoder_Start(&htim4,TIM_CHANNEL_ALL);      //旋转编码器
   HAL_Delay(20);
