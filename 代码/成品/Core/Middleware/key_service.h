@@ -9,6 +9,7 @@
 void KEY_Init(void);
 void Encoder_Process(void);
 void DAC_SW_CH(void);
+extern float DAC1_cmd;
 #define SW_DAC_CHANNEL_1         0
 #define SW_DAC_CHANNEL_2         1
 

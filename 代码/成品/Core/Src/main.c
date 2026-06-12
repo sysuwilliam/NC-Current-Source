@@ -29,12 +29,12 @@
 /* USER CODE BEGIN Includes */
 #include "button.h"
 #include "dsp_DAC.h"
-#include "dsp_test_communication.h"
 #include "key_service.h"
 #include "PID.h"
 #include "dsp_ADC.h"
-#include "global_value.h"
 #include "TJC_HMI.h"
+#include "global_value.h"
+#include "App_control.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,7 +44,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SEND_TIME 3000  //发送间隔
+#define SEND_TIME 200  //发送间隔
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -111,25 +111,38 @@ int main(void)
   ADC_Init();
   TJC_HMI_Init(&huart2);
 
+  PID_Init();
+
   DAC_Init(&hspi1);       //初始化DAC
+
+  I_set = 0.22f;
+  DAC1_cmd = 1.2f;
 
   HAL_TIM_Encoder_Start(&htim4,TIM_CHANNEL_ALL);      //旋转编码器
   HAL_Delay(20);
 
   uint32_t last_tick = HAL_GetTick();
-
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    TJC_HMI_Process();
     Button_Process();
     Encoder_Process();
     Filter_Output();
+    if (ADC_FLAG == 1) {
+      if (Safe_flag == TJC_PROTECT_NORMAL || Safe_flag == TJC_PROTECT_SHORT_LIMIT) {
+        BUCK_Loop();
+        PID_Current_Loop();
+      }
+      ADC_FLAG = 0;
+    }
+
     if (HAL_GetTick() - last_tick >= SEND_TIME) {
       last_tick = HAL_GetTick();
-      Global_OUTPUT();
+      Safe_control();
     }
     /* USER CODE END WHILE */
 

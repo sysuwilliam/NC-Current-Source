@@ -3,8 +3,6 @@
 //
 
 #include "PID.h"
-
-#include <complex.h>
 #include <stdlib.h>
 #include "main.h"
 #include "dsp_ADC.h"
@@ -12,27 +10,29 @@
 #include "dsp_DAC.h"
 
 
-// 实例化全局变量
-PID_Controller_t pid_current;
-
 /*均值滤波*/
 // 为 连续采样开辟的独立通道物理数组（保持静态全局区分配，防栈溢出）
 static uint16_t sample_box_p[NA];
 static uint16_t sample_box_n[NA];
 static uint16_t sample_box_s[NA];
 
-//============中间计算量============//
+
 float VOUTP_Middle;
 float VOUTN_Middle;
 float Vsence_Middle;
 float I_Middle;
 
+// 实例化PID电流全局变量
+PID_Controller_t pid_current;
 
+
+/*卡尔曼滤波*/
+// 初始化卡尔曼参数
 Kalman_Scalar_t kalman_v_p = {
     .x_last = 0.0f,
     .EST_last = 1.0f,   // 不为0即可
     .Q = 0.001f,      //
-    .MEA = 0.05f        // 根据ADC跳动范围来定（比如跳动幅度的方差）
+    .MEA = 0.05f        // 根据你ADC跳动范围来定（比如跳动幅度的方差）
 };
 
 Kalman_Scalar_t kalman_v_n = {
@@ -46,18 +46,8 @@ Kalman_Scalar_t kalman_v_s = {
     .x_last = 0.0f,
     .EST_last = 1.0f,   // 不为0即可
     .Q = 0.001f,      //
-    .MEA = 0.05f        // 根据ADC跳动范围来定（比如跳动幅度的方差）
+    .MEA = 0.05f        // 根据你ADC跳动范围来定（比如跳动幅度的方差）
 };
-
-/*卡尔曼滤波*/
-// 在设定电流改变时重置卡尔曼参数
-void Kalman_init(void) {
-    kalman_v_s.x_last        = I_set * Rs;
-    kalman_v_s.EST_last      = 0.5f;
-
-
-}
-
 
 
 /**
@@ -96,35 +86,60 @@ void Filter_Output(void) {
     /*-----------------------------------------------------------------
      * 4. 核心物理账本刷新
      *----------------------------------------------------------------*/
-
     //===========负载电压============//
     if (VOUTP_Middle < 0.001f) {
         VOUTP_adc = 0.0f;
-        return;
+    }else {
+        VOUTP_adc = 0.98663f*(VOUTP_Middle * 11.0f)+0.13675f;
     }
     if (VOUTN_Middle < 0.001f) {
         VOUTN_adc = 0.0f;
-        return;
+    }else {
+        VOUTN_adc = 0.97992f * (VOUTN_Middle * 11.0f)+0.24886f;
     }
-    //VOUTP_adc = (VOUTP_Middle * 0.985864f *11.0f) + 0.001825f;
-    VOUTP_adc = VOUTP_Middle * 11.0f;
-    //VOUTN_adc = (VOUTN_Middle * 0.998639f *11.0f) + 0.026753f;
-    VOUTN_adc = VOUTN_Middle * 11.0f;
 
-    //===========mos管电压===========//
-    Vmos = VOUTN_adc - Vsence_adc;
-
-    //===========实际电流============//
     Vsence_adc = Vsence_Middle;
-
+    Vmos = VOUTN_adc - Vsence_adc;
     I_Middle = Vsence_adc / Rs;
-    //I_disp = (I_Middle * 0.98022f) + 0.023329f;
-    if (I_Middle < 0.001f) {
+
+
+    if (I_Middle < 0.001f)
+    {
         I_disp = 0.0f;
-        return;
     }
-    I_disp = I_Middle+(4.821f-0.01811f*I_Middle);
+    else
+    {
+        // 1. 基础线性修正（单位：A）
+        float I_base = 0.98189f * I_Middle + 0.004821f;
+
+        // 2. 连续型非线性残余误差精细修正（基于最新测试数据精密对齐）
+        if (I_base < 0.010f) {
+            I_disp = (I_base > 0.0f) ? (I_base * 0.943f) : 0.0f;
+        }
+        else if (0.010f <= I_base && I_base < 0.020f) I_disp = 0.9861f * I_base + 0.000649f;
+        else if (0.020f <= I_base && I_base < 0.030f) I_disp = 0.9919f * I_base + 0.001253f - 0.0007f;
+        else if (0.030f <= I_base && I_base < 0.040f) I_disp = 1.032f * I_base - 0.000350f - 0.0007f;
+        else if (0.040f <= I_base && I_base < 0.050f) I_disp = 0.979f * I_base + 0.001740f;
+        else if (0.050f <= I_base && I_base < 0.060f) I_disp = 1.036f * I_base - 0.001240f;
+        else if (0.060f <= I_base && I_base < 0.070f) I_disp = 1.015f * I_base - 0.000520f;
+        else if (0.070f <= I_base && I_base < 0.080f) I_disp = 0.986f * I_base + 0.001510f;
+        else if (0.080f <= I_base && I_base < 0.090f) I_disp = 0.941f * I_base + 0.005410f;
+        else if (0.090f <= I_base && I_base < 0.100f) I_disp = 1.028f * I_base - 0.001720f;
+        else {
+            // 大于 100mA 维持原有的高精度基础线，并整体无缝平移补偿大电流中值硬误差
+            I_disp = I_base + 0.00085f;
+        }
+
+        // 3. 异常大电流保护
+        if (I_disp > 0.55f) {
+            I_disp = I_Middle;
+            Safe_flag = TJC_PROTECT_OVERCURRENT;
+        }
+    }
+
+    ADC_FLAG = 1;
 }
+
 
 
 /**
@@ -134,7 +149,7 @@ void Filter_Output(void) {
 void PID_Init(void)
 {
     // 严格对齐 2000 倍标度的物理阻尼参数
-    pid_current.Kp = 0.0005f;
+    pid_current.Kp = 0.0007f;
     pid_current.Ki = 0.00025f;
     pid_current.Kd = 0.0f;
 
@@ -145,6 +160,7 @@ void PID_Init(void)
     pid_current.err_last1 = 0;
     pid_current.err_last2 = 0;
     pid_current.out_delta = 0.0f;
+
 }
 
 /**
@@ -154,6 +170,7 @@ void PID_Init(void)
 
 void PID_Current_Loop(void)
 {
+
     // 1. 同步当前最新的全局变量，精度为1/2000.
     pid_current.target = (int32_t)(I_set * PID_CURRENT_SCALE);
     pid_current.actual = (int32_t)(I_disp * PID_CURRENT_SCALE);
@@ -192,4 +209,44 @@ void PID_Current_Loop(void)
     // 8. 滚动的状态历史记录前移
     pid_current.err_last2 = pid_current.err_last1;
     pid_current.err_last1 = pid_current.err_curr;
+}
+
+void BUCK_Loop(void) {
+    // 1. 前置防线：如果硬件未使能，立刻退出
+    if (HAL_GPIO_ReadPin(BUCK_EN_GPIO_Port, BUCK_EN_Pin) == GPIO_PIN_RESET) {
+        return;
+    }
+
+    static uint32_t last_slow_tick = 0;
+
+    // 2. 1000ms 定时器时轴拦截（1秒定量刷新一次）
+    if (HAL_GetTick() - last_slow_tick < 1000) {
+        return;
+    }
+    last_slow_tick = HAL_GetTick();
+
+    // 3. 小电流保护拦截：低于 10mA 时保持安全低电压输出，防止空载开路过压
+    if (I_set < 0.010f) {
+        DAC1_cmd = 0.35f; // 给一个安全低基准电平
+        DAC_Set_Voltage(DAC_CHANNEL_1, DAC_GAIN_2X, DAC1_cmd);
+        return;
+    }
+
+    // 4. 计算VOUTP
+    float VOUTP_target = (I_set * Rload_disp) + (I_set * Rs) + 1.2f;
+
+    // 5. 通过板载硬件传递函数，将物理电压逆向转换为 DAC1 的控制量
+    // 公式源自物理校准：VOUT+ = 10.012879 * DAC1 - 1.797554
+    DAC1_cmd = (VOUTP_target + 1.797554f) / 10.012879f;
+
+    // 6. 强制硬件红线边界拦截 (依据你提供的 3.3V 极限安全边界钳位)
+    if (DAC1_cmd < 0.0f) {
+        DAC1_cmd = 0.0f;
+    }
+    else if (DAC1_cmd >= 3.3f) {
+        DAC1_cmd = 3.3f;
+    }
+
+    // 7. 物理刷新硬件外设
+    DAC_Set_Voltage(DAC_CHANNEL_1, DAC_GAIN_2X, DAC1_cmd);
 }

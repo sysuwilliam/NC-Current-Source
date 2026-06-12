@@ -48,7 +48,8 @@ typedef enum
     TJC_PROTECT_NORMAL = 0,
     TJC_PROTECT_OVERCURRENT,
     TJC_PROTECT_SHORT_LIMIT,
-    TJC_PROTECT_OPEN_LOAD
+    TJC_PROTECT_OPEN_LOAD,
+    TJC_PROTECT_IDLE,
 } TJC_ProtectState_t;
 
 typedef struct
@@ -66,8 +67,27 @@ typedef struct
 /**
  * @brief  初始化陶晶驰串口屏驱动，并向屏幕写入默认显示值。
  * @param  huart 串口句柄；传 NULL 时保持默认 USART2。
+ * @retval HAL 状态码。
  */
-void TJC_HMI_Init(UART_HandleTypeDef *huart);
+HAL_StatusTypeDef TJC_HMI_Init(UART_HandleTypeDef *huart);
+
+/**
+ * @brief  主动处理发送队列与异常恢复。
+ * @note   如果主循环较长时间不再调用任何 TJC 接口，可周期调用本函数做超时恢复。
+ */
+void TJC_HMI_Process(void);
+
+/**
+ * @brief  查询最近一次驱动层错误码。
+ * @retval 最近一次错误；HAL_OK 表示最近一次操作成功。
+ */
+HAL_StatusTypeDef TJC_HMI_GetLastError(void);
+
+/**
+ * @brief  查询驱动当前是否处于可发送状态。
+ * @retval 1 表示在线，0 表示驱动已进入离线降级等待重试。
+ */
+uint8_t TJC_HMI_IsOnline(void);
 
 /**
  * @brief  发送一条陶晶驰原始指令，并自动追加 0xff 0xff 0xff。
@@ -124,62 +144,125 @@ HAL_StatusTypeDef TJC_Beep(uint16_t time_ms);
 
 /**
  * @brief  设置工作模式显示为“恒流模式”。
+ * @retval HAL 状态码。
  */
-void TJC_SetWorkModeConstCurrent(void);
+HAL_StatusTypeDef TJC_SetWorkModeConstCurrent(void);
 
 /**
  * @brief  更新输出状态显示。
  * @param  state 输出状态枚举值。
+ * @retval HAL 状态码。
  */
-void TJC_SetOutputState(TJC_OutputState_t state);
+HAL_StatusTypeDef TJC_SetOutputState(TJC_OutputState_t state);
 
 /**
  * @brief  更新保护状态显示，并在故障状态变化时触发蜂鸣报警。
  * @param  state 保护状态枚举值。
+ * @retval HAL 状态码。
  */
-void TJC_SetProtectState(TJC_ProtectState_t state);
+HAL_StatusTypeDef TJC_SetProtectState(TJC_ProtectState_t state);
 
 /**
  * @brief  更新设定电流显示。
- * @param  current_mA 设定电流，单位 mA，范围限制为 0~500。
+ * @param  current_mA 设定电流，单位 mA。
+ * @retval HAL 状态码。
  */
-void TJC_SetSetCurrent_mA(int32_t current_mA);
+HAL_StatusTypeDef TJC_SetSetCurrent_mA(int32_t current_mA);
 
 /**
  * @brief  更新实际电流显示。
  * @param  current_uA 实际电流，单位 uA，屏幕显示为 mA 并保留 2 位小数。
+ * @retval HAL 状态码。
  */
-void TJC_SetActualCurrent_uA(int32_t current_uA);
+HAL_StatusTypeDef TJC_SetActualCurrent_uA(int32_t current_uA);
 
 /**
  * @brief  更新负载电阻显示。
  * @param  resistance_mOhm 负载电阻，单位 mOhm，屏幕显示为 Ohm 并保留 2 位小数。
+ * @retval HAL 状态码。
  */
-void TJC_SetLoadResistance_mOhm(int32_t resistance_mOhm);
+HAL_StatusTypeDef TJC_SetLoadResistance_mOhm(int32_t resistance_mOhm);
 
 /**
  * @brief  更新负载电压显示。
  * @param  voltage_mV 负载电压，单位 mV，屏幕显示为 V 并保留 2 位小数。
+ * @retval HAL 状态码。
  */
-void TJC_SetLoadVoltage_mV(int32_t voltage_mV);
+HAL_StatusTypeDef TJC_SetLoadVoltage_mV(int32_t voltage_mV);
 
 /**
  * @brief  更新负载功率显示。
  * @param  power_mW 负载功率，单位 mW，屏幕显示为 W 并保留 2 位小数。
+ * @retval HAL 状态码。
  */
-void TJC_SetLoadPower_mW(int32_t power_mW);
+HAL_StatusTypeDef TJC_SetLoadPower_mW(int32_t power_mW);
 
 /**
  * @brief  更新过流阈值显示。
  * @param  threshold_mA 过流阈值，单位 mA。
+ * @retval HAL 状态码。
  */
-void TJC_SetOvercurrentThreshold_mA(int32_t threshold_mA);
+HAL_StatusTypeDef TJC_SetOvercurrentThreshold_mA(int32_t threshold_mA);
 
 /**
  * @brief  一次性刷新主界面的所有动态显示量。
  * @param  data 主界面显示数据结构指针。
+ * @retval HAL 状态码。
  */
-void TJC_UpdateAll(const TJC_HmiData_t *data);
+HAL_StatusTypeDef TJC_UpdateAll(const TJC_HmiData_t *data);
+
+HAL_StatusTypeDef TJC_DAC_CH1(int32_t DAC_CH1_mV);
+HAL_StatusTypeDef TJC_DAC_CH2(int32_t DAC_CH2_mV);
+
+/**
+ * @brief  清除波形控件的指定通道数据。
+ * @param  obj_id 波形控件 ID。
+ * @param  channel 通道号；传 255 表示清除全部通道。
+ * @retval HAL 状态码。
+ */
+HAL_StatusTypeDef TJC_WaveformClear(uint8_t obj_id, uint8_t channel);
+
+/**
+ * @brief  向波形控件指定通道追加一个采样点。
+ * @param  obj_id 波形控件 ID。
+ * @param  channel 通道号。
+ * @param  value 波形原始值。
+ * @retval HAL 状态码。
+ */
+HAL_StatusTypeDef TJC_WaveformAdd(uint8_t obj_id, uint8_t channel, uint8_t value);
+
+/**
+ * @brief  初始化 s0 波形控件的电流显示配置。
+ * @note   逻辑纵坐标定义为 0~500mA，内部映射到波形原始值 0~138。
+ *         通道 0 显示设定电流，通道 1 显示负载电流。
+ * @retval HAL 状态码。
+ */
+HAL_StatusTypeDef TJC_WaveS0_CurrentAxisInit(void);
+
+/**
+ * @brief  向 s0 波形控件写入一组电流采样点。
+ * @param  set_current_mA 设定电流，单位 mA，写入通道 0。
+ * @param  load_current_uA 负载电流，单位 uA，写入通道 1。
+ * @retval HAL 状态码。
+ */
+HAL_StatusTypeDef TJC_WaveS0_AddCurrentPoint(int32_t set_current_mA, int32_t load_current_uA);
+
+/**
+ * @brief  重置 s0 的动态窗口电流波形参数。
+ * @param  window_min_mA 初始窗口下边界，单位 mA。
+ * @note   动态窗口总量程仍限制在 0~500mA，但单次显示窗口高度仅 10mA。
+ */
+void TJC_WaveS0_DynamicWindowReset(int32_t window_min_mA);
+
+/**
+ * @brief  向 s0 写入动态窗口模式的电流波形点。
+ * @param  set_current_mA 设定电流，单位 mA，写入通道 0。
+ * @param  load_current_uA 负载电流，单位 uA，写入通道 1。
+ * @note   本函数会自动调整 10mA 高度的纵向窗口，使当前波形尽量保持在窗口中部。
+ *         目前先预留在驱动中，默认业务流仍使用静态 0~500mA 映射函数。
+ * @retval HAL 状态码。
+ */
+HAL_StatusTypeDef TJC_WaveS0_AddCurrentPointDynamicWindow(int32_t set_current_mA, int32_t load_current_uA);
 
 #ifdef __cplusplus
 }

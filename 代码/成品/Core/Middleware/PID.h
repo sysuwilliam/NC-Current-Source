@@ -31,11 +31,13 @@ typedef struct {
  * @note  若控制精度为 0.5mA，则 1A 对应 2000 个定点字 (1.0f / 0.0005f = 2000.0f)
  */
 #define PID_CURRENT_SCALE       2000.0f
+#define PID_VOUTP_SCALE         1000.0f
 
 /** * @brief 工业级闭环控制死区阈值 (单位: 对应扩展后的定点字)
  * @note  物理死区设为 1mA。在 0.5mA/字的标度下：1mA / 0.5mA = 2 个字
  */
 #define PID_CURRENT_DEADBAND    2
+#define PID_VOUTP_DEADBAND      2
 
 
 // extern PID_Controller_t pid_current;
@@ -44,5 +46,8 @@ typedef struct {
 void PID_Init(void);
 void PID_Current_Loop(void);
 void Filter_Output(void);
-void Kalman_init(void);
+void PID_BUCK_Loop(void);
+void BUCK_Loop(void);
+
+
 #endif //CI_SOURCE_FINISHED_PID_H

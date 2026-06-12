@@ -4,7 +4,7 @@
  * 陶晶驰串口屏驱动库实现
  *
  * 本文件只负责“屏幕显示层”的事情：
- * - 底层：通过 UART 发送陶晶驰指令，并自动追加 0xff 0xff 0xff。
+ * - 底层：通过 UART 非阻塞发送陶晶驰指令，并自动追加 0xff 0xff 0xff。
  * - 中层：提供设置文本控件、数字控件、虚拟浮点数控件的通用函数。
  * - 上层：按当前页面控件编号封装恒流源主界面的显示更新函数。
  *
@@ -25,11 +25,15 @@
 
 #include "TJC_HMI.h"
 #include "usart.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
-#define TJC_CMD_BUF_LEN 64
-#define TJC_TX_TIMEOUT_MS 50
+#define TJC_CMD_BUF_LEN            64
+#define TJC_FRAME_BUF_LEN          (TJC_CMD_BUF_LEN + 3U)
+#define TJC_TX_QUEUE_DEPTH         16U
+#define TJC_TX_STUCK_TIMEOUT_MS    100U
+#define TJC_OFFLINE_RETRY_DELAY_MS 500U
 
 // 当前 HMI 页面中的动态控件编号。
 // 若后续在 USART HMI 工具中改了控件名，只需要改这里。
@@ -41,7 +45,19 @@
 #define TJC_OBJ_LOAD_RESISTANCE "x1"
 #define TJC_OBJ_LOAD_VOLTAGE    "x2"
 #define TJC_OBJ_LOAD_POWER      "x3"
+#define TJC_OBJ_DAC_CH1_VOLTAGE "x4"
+#define TJC_OBJ_DAC_CH2_VOLTAGE "x5"
 #define TJC_OBJ_OVERCURRENT     "n1"
+#define TJC_WAVEFORM_CURRENT_ID 28U
+#define TJC_WAVEFORM_SET_CH     0U
+#define TJC_WAVEFORM_LOAD_CH    1U
+
+#define TJC_WAVEFORM_CURRENT_MIN_MA 0
+#define TJC_WAVEFORM_CURRENT_MAX_MA 500
+#define TJC_WAVEFORM_RAW_MIN        0
+#define TJC_WAVEFORM_RAW_MAX        138
+#define TJC_WAVEFORM_WINDOW_SPAN_MA 10
+#define TJC_WAVEFORM_WINDOW_MARGIN_MA 2
 
 #define TJC_BEEP_SHORT_LIMIT_MS 200
 #define TJC_BEEP_OPEN_LOAD_MS   400
@@ -50,66 +66,295 @@
 #define TJC_COLOR_BLACK 0
 #define TJC_COLOR_RED   63488
 
+typedef struct
+{
+    uint16_t len;
+    uint8_t data[TJC_FRAME_BUF_LEN];
+} TJC_TxFrame_t;
+
 // 默认使用 USART2 连接串口屏：PA2(TX) -> 屏幕 RX，PA3(RX) -> 屏幕 TX。
 static UART_HandleTypeDef *tjc_uart = &huart2;
 static TJC_ProtectState_t tjc_last_protect_state = TJC_PROTECT_NORMAL;
 
+static TJC_TxFrame_t tjc_tx_queue[TJC_TX_QUEUE_DEPTH];
+static volatile uint8_t tjc_tx_head = 0;
+static volatile uint8_t tjc_tx_tail = 0;
+static volatile uint8_t tjc_tx_count = 0;
+static volatile uint8_t tjc_tx_active = 0;
+static volatile uint8_t tjc_online = 1;
+static volatile uint32_t tjc_tx_start_tick = 0;
+static volatile uint32_t tjc_retry_after_tick = 0;
+static volatile HAL_StatusTypeDef tjc_last_error = HAL_OK;
+static int32_t tjc_wave_window_min_mA = TJC_WAVEFORM_CURRENT_MIN_MA;
 
-/******************** 底层函数：UART 发送与陶晶驰指令结束符 ********************/
 
-/**
- * @brief  通过当前串口发送原始字节数据。
- * @param  data 数据缓冲区指针。
- * @param  len  要发送的字节数。
- * @retval HAL 状态码。
- */
-static HAL_StatusTypeDef TJC_WriteBytes(const uint8_t *data, uint16_t len)
+/******************** 底层函数：UART 发送队列与状态管理 ********************/
+
+static uint8_t TJC_TimeReached(uint32_t now, uint32_t target)
 {
-    if (tjc_uart == NULL || data == NULL || len == 0) {
-        return HAL_ERROR;
+    return (uint8_t)((int32_t)(now - target) >= 0);
+}
+
+static void TJC_Lock(uint32_t *primask)
+{
+    *primask = __get_PRIMASK();
+    __disable_irq();
+}
+
+static void TJC_Unlock(uint32_t primask)
+{
+    if (primask == 0U) {
+        __enable_irq();
     }
-    return HAL_UART_Transmit(tjc_uart, (uint8_t *)data, len, TJC_TX_TIMEOUT_MS);
 }
 
-/**
- * @brief  发送陶晶驰指令结束符 0xff 0xff 0xff。
- * @retval HAL 状态码。
- */
-static HAL_StatusTypeDef TJC_SendEnd(void)
+static void TJC_ResetQueueLocked(void)
 {
-    static const uint8_t end_bytes[3] = {0xff, 0xff, 0xff};
-    return TJC_WriteBytes(end_bytes, sizeof(end_bytes));
+    tjc_tx_head = 0;
+    tjc_tx_tail = 0;
+    tjc_tx_count = 0;
 }
 
-/**
- * @brief  发送一条陶晶驰原始指令，并自动追加 0xff 0xff 0xff。
- * @param  cmd 不包含结束符的 ASCII 指令字符串。
- * @retval HAL 状态码。
- */
-HAL_StatusTypeDef TJC_SendCmd(const char *cmd)
+static void TJC_SetLastError(HAL_StatusTypeDef status)
+{
+    tjc_last_error = status;
+}
+
+static void TJC_MarkOnline(HAL_StatusTypeDef status)
+{
+    tjc_online = 1;
+    TJC_SetLastError(status);
+}
+
+static void TJC_MarkOfflineLocked(HAL_StatusTypeDef status)
+{
+    tjc_online = 0;
+    tjc_retry_after_tick = HAL_GetTick() + TJC_OFFLINE_RETRY_DELAY_MS;
+    tjc_tx_active = 0;
+    tjc_tx_start_tick = 0;
+    TJC_ResetQueueLocked();
+    TJC_SetLastError(status);
+}
+
+static HAL_StatusTypeDef TJC_CombineStatus(HAL_StatusTypeDef aggregate, HAL_StatusTypeDef current)
+{
+    return aggregate == HAL_OK ? current : aggregate;
+}
+
+static void TJC_ServiceTx(void)
 {
     HAL_StatusTypeDef status;
+    uint8_t *data;
+    uint16_t len;
+    uint32_t primask;
 
-    if (cmd == NULL) {
+    if (tjc_uart == NULL) {
+        TJC_SetLastError(HAL_ERROR);
+        return;
+    }
+
+    if (tjc_tx_active != 0U &&
+        TJC_TimeReached(HAL_GetTick(), tjc_tx_start_tick + TJC_TX_STUCK_TIMEOUT_MS) != 0U) {
+        (void)HAL_UART_AbortTransmit(tjc_uart);
+        TJC_Lock(&primask);
+        TJC_MarkOfflineLocked(HAL_TIMEOUT);
+        TJC_Unlock(primask);
+        return;
+    }
+
+    TJC_Lock(&primask);
+    if (tjc_tx_active != 0U || tjc_tx_count == 0U) {
+        TJC_Unlock(primask);
+        return;
+    }
+
+    data = tjc_tx_queue[tjc_tx_head].data;
+    len = tjc_tx_queue[tjc_tx_head].len;
+    tjc_tx_active = 1;
+    tjc_tx_start_tick = HAL_GetTick();
+    TJC_Unlock(primask);
+
+    status = HAL_UART_Transmit_IT(tjc_uart, data, len);
+    if (status != HAL_OK) {
+        TJC_Lock(&primask);
+        tjc_tx_active = 0;
+        tjc_tx_start_tick = 0;
+        if (status == HAL_ERROR || status == HAL_TIMEOUT) {
+            TJC_MarkOfflineLocked(status);
+        } else {
+            TJC_SetLastError(status);
+        }
+        TJC_Unlock(primask);
+        return;
+    }
+
+    TJC_MarkOnline(HAL_OK);
+}
+
+static HAL_StatusTypeDef TJC_QueueFrame(const uint8_t *frame, uint16_t frame_len)
+{
+    uint32_t primask;
+
+    if (tjc_uart == NULL || frame == NULL || frame_len == 0U || frame_len > TJC_FRAME_BUF_LEN) {
+        TJC_SetLastError(HAL_ERROR);
         return HAL_ERROR;
     }
 
-    // 先发送 ASCII 指令正文，再补陶晶驰结束符。
-    status = TJC_WriteBytes((const uint8_t *)cmd, (uint16_t)strlen(cmd));
-    if (status != HAL_OK) {
-        return status;
+    TJC_ServiceTx();
+
+    if (tjc_online == 0U &&
+        TJC_TimeReached(HAL_GetTick(), tjc_retry_after_tick) == 0U) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
     }
 
-    return TJC_SendEnd();
+    TJC_Lock(&primask);
+    if (tjc_tx_count >= TJC_TX_QUEUE_DEPTH) {
+        TJC_SetLastError(HAL_BUSY);
+        TJC_Unlock(primask);
+        return HAL_BUSY;
+    }
+
+    memcpy(tjc_tx_queue[tjc_tx_tail].data, frame, frame_len);
+    tjc_tx_queue[tjc_tx_tail].len = frame_len;
+    tjc_tx_tail = (uint8_t)((tjc_tx_tail + 1U) % TJC_TX_QUEUE_DEPTH);
+    tjc_tx_count++;
+    TJC_Unlock(primask);
+
+    TJC_ServiceTx();
+    return HAL_OK;
 }
 
-/**
- * @brief  将 int32_t 数值限制在指定范围内。
- * @param  value     输入值。
- * @param  min_value 最小允许值。
- * @param  max_value 最大允许值。
- * @retval 限幅后的值。
- */
+static HAL_StatusTypeDef TJC_FormatAndSendCmd(const char *fmt, ...)
+{
+    char cmd[TJC_CMD_BUF_LEN];
+    int written;
+    va_list args;
+
+    if (fmt == NULL) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
+
+    va_start(args, fmt);
+    written = vsnprintf(cmd, sizeof(cmd), fmt, args);
+    va_end(args);
+
+    if (written < 0 || written >= (int)sizeof(cmd)) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
+
+    return TJC_SendCmd(cmd);
+}
+
+static void TJC_OnTxFinished(UART_HandleTypeDef *huart, HAL_StatusTypeDef status)
+{
+    uint32_t primask;
+
+    if (huart != tjc_uart) {
+        return;
+    }
+
+    TJC_Lock(&primask);
+    if (tjc_tx_count > 0U) {
+        tjc_tx_head = (uint8_t)((tjc_tx_head + 1U) % TJC_TX_QUEUE_DEPTH);
+        tjc_tx_count--;
+    }
+    tjc_tx_active = 0;
+    tjc_tx_start_tick = 0;
+
+    if (status == HAL_OK) {
+        TJC_MarkOnline(HAL_OK);
+    } else {
+        TJC_MarkOfflineLocked(status);
+    }
+    TJC_Unlock(primask);
+
+    if (status == HAL_OK) {
+        TJC_ServiceTx();
+    }
+}
+
+
+/******************** 中层函数：通用控件属性写入 ********************/
+
+HAL_StatusTypeDef TJC_SendCmd(const char *cmd)
+{
+    uint8_t frame[TJC_FRAME_BUF_LEN];
+    size_t cmd_len;
+
+    if (cmd == NULL) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
+
+    cmd_len = strlen(cmd);
+    if (cmd_len == 0U || cmd_len > TJC_CMD_BUF_LEN) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
+
+    memcpy(frame, cmd, cmd_len);
+    frame[cmd_len] = 0xffU;
+    frame[cmd_len + 1U] = 0xffU;
+    frame[cmd_len + 2U] = 0xffU;
+    return TJC_QueueFrame(frame, (uint16_t)(cmd_len + 3U));
+}
+
+HAL_StatusTypeDef TJC_SetText(const char *obj, const char *txt)
+{
+    if (obj == NULL || txt == NULL) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
+
+    return TJC_FormatAndSendCmd("%s.txt=\"%s\"", obj, txt);
+}
+
+HAL_StatusTypeDef TJC_SetInt(const char *obj, int32_t value)
+{
+    if (obj == NULL) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
+
+    return TJC_FormatAndSendCmd("%s.val=%ld", obj, (long)value);
+}
+
+HAL_StatusTypeDef TJC_SetXFloatRaw(const char *obj, int32_t value)
+{
+    return TJC_SetInt(obj, value);
+}
+
+HAL_StatusTypeDef TJC_SetColor(const char *obj, uint16_t color)
+{
+    if (obj == NULL) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
+
+    return TJC_FormatAndSendCmd("%s.pco=%u", obj, (unsigned int)color);
+}
+
+HAL_StatusTypeDef TJC_Page(const char *page_name)
+{
+    if (page_name == NULL) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
+
+    return TJC_FormatAndSendCmd("page %s", page_name);
+}
+
+HAL_StatusTypeDef TJC_Beep(uint16_t time_ms)
+{
+    return TJC_FormatAndSendCmd("beep %u", (unsigned int)time_ms);
+}
+
+
+/******************** 上层函数：恒流源主界面显示封装 ********************/
+
 static int32_t TJC_ClampI32(int32_t value, int32_t min_value, int32_t max_value)
 {
     if (value < min_value) {
@@ -121,12 +366,6 @@ static int32_t TJC_ClampI32(int32_t value, int32_t min_value, int32_t max_value)
     return value;
 }
 
-/**
- * @brief  对整数除法做四舍五入。
- * @param  numerator   分子。
- * @param  denominator 分母。
- * @retval 四舍五入后的整数结果。
- */
 static int32_t TJC_RoundDivI32(int64_t numerator, int32_t denominator)
 {
     if (denominator <= 0) {
@@ -138,212 +377,178 @@ static int32_t TJC_RoundDivI32(int64_t numerator, int32_t denominator)
     return (int32_t)((numerator - denominator / 2) / denominator);
 }
 
-/**
- * @brief  将输出状态枚举转换成屏幕显示文本。
- * @param  state 输出状态枚举值。
- * @retval 对应的中文状态字符串。
- */
 static const char *TJC_OutputStateText(TJC_OutputState_t state)
 {
     switch (state) {
         case TJC_OUTPUT_ON:
-            return "输出中";
+            return "OUTPUT";
         case TJC_OUTPUT_FAULT:
-            return "故障";
+            return "FAULT";
         case TJC_OUTPUT_OFF:
         default:
-            return "关闭";
+            return "CLOSE";
     }
 }
 
-/**
- * @brief  将保护状态枚举转换成屏幕显示文本。
- * @param  state 保护状态枚举值。
- * @retval 对应的中文状态字符串。
- */
 static const char *TJC_ProtectStateText(TJC_ProtectState_t state)
 {
     switch (state) {
         case TJC_PROTECT_OVERCURRENT:
-            return "过流";
+            return "Over C";
         case TJC_PROTECT_SHORT_LIMIT:
-            return "短路限流";
+            return "Short C";
         case TJC_PROTECT_OPEN_LOAD:
-            return "开路报警";
+            return "Open C";
         case TJC_PROTECT_NORMAL:
         default:
-            return "正常";
+            return "NORMAL";
     }
 }
 
-
-/******************** 中层函数：通用控件属性写入 ********************/
-
-/**
- * @brief  设置文本控件的 txt 属性。
- * @param  obj 控件名，例如 "t6"。
- * @param  txt 要显示的文本内容。
- * @retval HAL 状态码。
- */
-HAL_StatusTypeDef TJC_SetText(const char *obj, const char *txt)
+static uint8_t TJC_MapCurrentToWaveRaw(int32_t current_mA)
 {
-    char cmd[TJC_CMD_BUF_LEN];
+    int32_t clamped_mA;
+    int32_t mapped;
 
-    if (obj == NULL || txt == NULL) {
-        return HAL_ERROR;
+    clamped_mA = TJC_ClampI32(current_mA,
+                              TJC_WAVEFORM_CURRENT_MIN_MA,
+                              TJC_WAVEFORM_CURRENT_MAX_MA);
+    mapped = TJC_RoundDivI32((int64_t)(clamped_mA - TJC_WAVEFORM_CURRENT_MIN_MA) *
+                             (TJC_WAVEFORM_RAW_MAX - TJC_WAVEFORM_RAW_MIN),
+                             TJC_WAVEFORM_CURRENT_MAX_MA - TJC_WAVEFORM_CURRENT_MIN_MA);
+    mapped += TJC_WAVEFORM_RAW_MIN;
+    mapped = TJC_ClampI32(mapped, TJC_WAVEFORM_RAW_MIN, TJC_WAVEFORM_RAW_MAX);
+    return (uint8_t)mapped;
+}
+
+static uint8_t TJC_MapCurrentToWindowRaw(int32_t current_mA, int32_t window_min_mA, int32_t window_max_mA)
+{
+    int32_t clamped_current;
+    int32_t mapped;
+    int32_t span_mA;
+
+    span_mA = window_max_mA - window_min_mA;
+    if (span_mA <= 0) {
+        return 0U;
     }
 
-    // 文本控件格式：控件.txt="内容"
-    snprintf(cmd, sizeof(cmd), "%s.txt=\"%s\"", obj, txt);
-    return TJC_SendCmd(cmd);
+    clamped_current = TJC_ClampI32(current_mA, window_min_mA, window_max_mA);
+    mapped = TJC_RoundDivI32((int64_t)(clamped_current - window_min_mA) *
+                             (TJC_WAVEFORM_RAW_MAX - TJC_WAVEFORM_RAW_MIN),
+                             span_mA);
+    mapped += TJC_WAVEFORM_RAW_MIN;
+    mapped = TJC_ClampI32(mapped, TJC_WAVEFORM_RAW_MIN, TJC_WAVEFORM_RAW_MAX);
+    return (uint8_t)mapped;
 }
 
-/**
- * @brief  设置数字控件或虚拟浮点数控件的 val 属性。
- * @param  obj 控件名，例如 "n0"。
- * @param  value 要写入的整数值。
- * @retval HAL 状态码。
- */
-HAL_StatusTypeDef TJC_SetInt(const char *obj, int32_t value)
+static void TJC_AdjustDynamicWindow(int32_t sample_min_mA, int32_t sample_max_mA)
 {
-    char cmd[TJC_CMD_BUF_LEN];
+    int32_t window_min_mA;
+    int32_t window_max_mA;
+    int32_t target_center_mA;
 
-    if (obj == NULL) {
-        return HAL_ERROR;
+    window_min_mA = tjc_wave_window_min_mA;
+    window_min_mA = TJC_ClampI32(window_min_mA,
+                                 TJC_WAVEFORM_CURRENT_MIN_MA,
+                                 TJC_WAVEFORM_CURRENT_MAX_MA - TJC_WAVEFORM_WINDOW_SPAN_MA);
+    window_max_mA = window_min_mA + TJC_WAVEFORM_WINDOW_SPAN_MA;
+
+    if (sample_min_mA < window_min_mA + TJC_WAVEFORM_WINDOW_MARGIN_MA ||
+        sample_max_mA > window_max_mA - TJC_WAVEFORM_WINDOW_MARGIN_MA) {
+        target_center_mA = TJC_RoundDivI32((int64_t)sample_min_mA + (int64_t)sample_max_mA, 2);
+        window_min_mA = target_center_mA - (TJC_WAVEFORM_WINDOW_SPAN_MA / 2);
+        window_min_mA = TJC_ClampI32(window_min_mA,
+                                     TJC_WAVEFORM_CURRENT_MIN_MA,
+                                     TJC_WAVEFORM_CURRENT_MAX_MA - TJC_WAVEFORM_WINDOW_SPAN_MA);
+        tjc_wave_window_min_mA = window_min_mA;
     }
-
-    // 数字控件和虚拟浮点数控件都使用 val 属性。
-    snprintf(cmd, sizeof(cmd), "%s.val=%ld", obj, (long)value);
-    return TJC_SendCmd(cmd);
 }
 
-/**
- * @brief  设置虚拟浮点数控件的原始整数值。
- * @param  obj 控件名，例如 "x0"。
- * @param  value 已按控件小数位放大的整数值。
- * @retval HAL 状态码。
- */
-HAL_StatusTypeDef TJC_SetXFloatRaw(const char *obj, int32_t value)
+HAL_StatusTypeDef TJC_HMI_Init(UART_HandleTypeDef *huart)
 {
-    // 虚拟浮点数控件的“小数点位置”由 HMI 工程属性决定。
-    // 本函数只负责发送已经按小数位放大的整数。
-    return TJC_SetInt(obj, value);
-}
+    HAL_StatusTypeDef status = HAL_OK;
+    uint32_t primask;
 
-/**
- * @brief  设置控件前景色 pco 属性。
- * @param  obj 控件名，例如 "t8"。
- * @param  color RGB565 颜色值，例如黑色 0，红色 63488。
- * @retval HAL 状态码。
- */
-HAL_StatusTypeDef TJC_SetColor(const char *obj, uint16_t color)
-{
-    char cmd[TJC_CMD_BUF_LEN];
-
-    if (obj == NULL) {
-        return HAL_ERROR;
-    }
-
-    // 文本/数字控件前景色格式：控件.pco=颜色值
-    snprintf(cmd, sizeof(cmd), "%s.pco=%u", obj, (unsigned int)color);
-    return TJC_SendCmd(cmd);
-}
-
-/**
- * @brief  跳转到指定页面。
- * @param  page_name 页面名或页面 ID 字符串。
- * @retval HAL 状态码。
- */
-HAL_StatusTypeDef TJC_Page(const char *page_name)
-{
-    char cmd[TJC_CMD_BUF_LEN];
-
-    if (page_name == NULL) {
-        return HAL_ERROR;
-    }
-
-    // 页面跳转格式：page 页面名。正式工程优先用页面名，少用页面 ID。
-    snprintf(cmd, sizeof(cmd), "page %s", page_name);
-    return TJC_SendCmd(cmd);
-}
-
-/**
- * @brief  控制串口屏蜂鸣器响指定时间。
- * @param  time_ms 蜂鸣时间，单位 ms。
- * @retval HAL 状态码。
- */
-HAL_StatusTypeDef TJC_Beep(uint16_t time_ms)
-{
-    char cmd[TJC_CMD_BUF_LEN];
-
-    // 手册指令格式：beep time，time 单位为 ms。
-    snprintf(cmd, sizeof(cmd), "beep %u", (unsigned int)time_ms);
-    return TJC_SendCmd(cmd);
-}
-
-
-/******************** 上层函数：恒流源主界面显示封装 ********************/
-
-/**
- * @brief  初始化陶晶驰串口屏驱动，并向屏幕写入默认显示值。
- * @param  huart 串口句柄；传 NULL 时保持默认 USART2。
- */
-void TJC_HMI_Init(UART_HandleTypeDef *huart)
-{
     if (huart != NULL) {
         tjc_uart = huart;
     }
+    if (tjc_uart == NULL) {
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
+    }
 
-    // 给屏幕写入一组默认值，避免刚上电时显示旧数据。
-    TJC_SetWorkModeConstCurrent();
-    TJC_SetOutputState(TJC_OUTPUT_OFF);
-    TJC_SetProtectState(TJC_PROTECT_NORMAL);
-    TJC_SetSetCurrent_mA(0);
-    TJC_SetActualCurrent_uA(0);
-    TJC_SetLoadResistance_mOhm(0);
-    TJC_SetLoadVoltage_mV(0);
-    TJC_SetLoadPower_mW(0);
-    TJC_SetOvercurrentThreshold_mA(550);
+    TJC_Lock(&primask);
+    TJC_ResetQueueLocked();
+    tjc_tx_active = 0;
+    tjc_tx_start_tick = 0;
+    tjc_online = 1;
+    tjc_retry_after_tick = 0;
+    tjc_last_error = HAL_OK;
+    tjc_last_protect_state = TJC_PROTECT_NORMAL;
+    tjc_wave_window_min_mA = TJC_WAVEFORM_CURRENT_MIN_MA;
+    TJC_Unlock(primask);
+
+    status = TJC_CombineStatus(status, TJC_SetWorkModeConstCurrent());
+    status = TJC_CombineStatus(status, TJC_SetOutputState(TJC_OUTPUT_OFF));
+    status = TJC_CombineStatus(status, TJC_SetProtectState(TJC_PROTECT_NORMAL));
+    status = TJC_CombineStatus(status, TJC_SetSetCurrent_mA(0));
+    status = TJC_CombineStatus(status, TJC_SetActualCurrent_uA(0));
+    status = TJC_CombineStatus(status, TJC_SetLoadResistance_mOhm(0));
+    status = TJC_CombineStatus(status, TJC_SetLoadVoltage_mV(0));
+    status = TJC_CombineStatus(status, TJC_SetLoadPower_mW(0));
+    status = TJC_CombineStatus(status, TJC_DAC_CH1(0));
+    status = TJC_CombineStatus(status, TJC_DAC_CH2(0));
+    status = TJC_CombineStatus(status, TJC_SetOvercurrentThreshold_mA(550));
+    status = TJC_CombineStatus(status, TJC_WaveS0_CurrentAxisInit());
+    return status;
 }
 
-/**
- * @brief  设置工作模式显示为“恒流模式”。
- */
-void TJC_SetWorkModeConstCurrent(void)
+void TJC_HMI_Process(void)
 {
-    TJC_SetText(TJC_OBJ_WORK_MODE, "恒流模式");
+    TJC_ServiceTx();
 }
 
-/**
- * @brief  更新输出状态显示。
- * @param  state 输出状态枚举值。
- */
-void TJC_SetOutputState(TJC_OutputState_t state)
+HAL_StatusTypeDef TJC_HMI_GetLastError(void)
 {
-    TJC_SetText(TJC_OBJ_OUTPUT_STATE, TJC_OutputStateText(state));
+    return tjc_last_error;
 }
 
-/**
- * @brief  更新保护状态显示，并在故障状态变化时触发蜂鸣报警。
- * @param  state 保护状态枚举值。
- */
-void TJC_SetProtectState(TJC_ProtectState_t state)
+uint8_t TJC_HMI_IsOnline(void)
 {
-    TJC_SetText(TJC_OBJ_PROTECT_STATE, TJC_ProtectStateText(state));
-    TJC_SetColor(TJC_OBJ_PROTECT_STATE,
-                 state == TJC_PROTECT_NORMAL ? TJC_COLOR_BLACK : TJC_COLOR_RED);
+    return tjc_online;
+}
 
-    // 只在保护状态发生变化时报警，避免周期刷新屏幕导致蜂鸣器一直重复响。
-    if (state != tjc_last_protect_state) {
+HAL_StatusTypeDef TJC_SetWorkModeConstCurrent(void)
+{
+    return TJC_SetText(TJC_OBJ_WORK_MODE, "NC");
+}
+
+HAL_StatusTypeDef TJC_SetOutputState(TJC_OutputState_t state)
+{
+    return TJC_SetText(TJC_OBJ_OUTPUT_STATE, TJC_OutputStateText(state));
+}
+
+HAL_StatusTypeDef TJC_SetProtectState(TJC_ProtectState_t state)
+{
+    HAL_StatusTypeDef status;
+    HAL_StatusTypeDef text_status;
+    HAL_StatusTypeDef color_status;
+
+    text_status = TJC_SetText(TJC_OBJ_PROTECT_STATE, TJC_ProtectStateText(state));
+    color_status = TJC_SetColor(TJC_OBJ_PROTECT_STATE,
+                                state == TJC_PROTECT_NORMAL ? TJC_COLOR_BLACK : TJC_COLOR_RED);
+    status = TJC_CombineStatus(text_status, color_status);
+
+    if (text_status == HAL_OK && color_status == HAL_OK && state != tjc_last_protect_state) {
         switch (state) {
             case TJC_PROTECT_OVERCURRENT:
-                TJC_Beep(TJC_BEEP_OVERCURRENT_MS);
+                status = TJC_CombineStatus(status, TJC_Beep(TJC_BEEP_OVERCURRENT_MS));
                 break;
             case TJC_PROTECT_SHORT_LIMIT:
-                TJC_Beep(TJC_BEEP_SHORT_LIMIT_MS);
+                status = TJC_CombineStatus(status, TJC_Beep(TJC_BEEP_SHORT_LIMIT_MS));
                 break;
             case TJC_PROTECT_OPEN_LOAD:
-                TJC_Beep(TJC_BEEP_OPEN_LOAD_MS);
+                status = TJC_CombineStatus(status, TJC_Beep(TJC_BEEP_OPEN_LOAD_MS));
                 break;
             case TJC_PROTECT_NORMAL:
             default:
@@ -351,94 +556,181 @@ void TJC_SetProtectState(TJC_ProtectState_t state)
         }
         tjc_last_protect_state = state;
     }
+
+    return status;
 }
 
-/**
- * @brief  更新设定电流显示。
- * @param  current_mA 设定电流，单位 mA，范围限制为 0~500。
- */
-void TJC_SetSetCurrent_mA(int32_t current_mA)
+HAL_StatusTypeDef TJC_SetSetCurrent_mA(int32_t current_mA)
 {
-    current_mA = TJC_ClampI32(current_mA, 0, 500);
-    TJC_SetInt(TJC_OBJ_SET_CURRENT, current_mA);
+    return TJC_SetInt(TJC_OBJ_SET_CURRENT, current_mA);
 }
 
-/**
- * @brief  更新实际电流显示。
- * @param  current_uA 实际电流，单位 uA，屏幕显示为 mA 并保留 2 位小数。
- */
-void TJC_SetActualCurrent_uA(int32_t current_uA)
+HAL_StatusTypeDef TJC_SetActualCurrent_uA(int32_t current_uA)
 {
-    // uA -> 0.01 mA：1 mA = 1000 uA，所以除以 10 得到百分之一 mA。
     int32_t centi_mA = TJC_RoundDivI32((int64_t)current_uA, 10);
     centi_mA = TJC_ClampI32(centi_mA, 0, 99999);
-    TJC_SetXFloatRaw(TJC_OBJ_ACTUAL_CURRENT, centi_mA);
+    return TJC_SetXFloatRaw(TJC_OBJ_ACTUAL_CURRENT, centi_mA);
 }
 
-/**
- * @brief  更新负载电阻显示。
- * @param  resistance_mOhm 负载电阻，单位 mOhm，屏幕显示为 Ohm 并保留 2 位小数。
- */
-void TJC_SetLoadResistance_mOhm(int32_t resistance_mOhm)
+HAL_StatusTypeDef TJC_SetLoadResistance_mOhm(int32_t resistance_mOhm)
 {
-    // mOhm -> 0.01 Ohm：1 Ohm = 1000 mOhm，所以除以 10。
     int32_t centi_ohm = TJC_RoundDivI32((int64_t)resistance_mOhm, 10);
     centi_ohm = TJC_ClampI32(centi_ohm, 0, 99999);
-    TJC_SetXFloatRaw(TJC_OBJ_LOAD_RESISTANCE, centi_ohm);
+    return TJC_SetXFloatRaw(TJC_OBJ_LOAD_RESISTANCE, centi_ohm);
 }
 
-/**
- * @brief  更新负载电压显示。
- * @param  voltage_mV 负载电压，单位 mV，屏幕显示为 V 并保留 2 位小数。
- */
-void TJC_SetLoadVoltage_mV(int32_t voltage_mV)
+HAL_StatusTypeDef TJC_SetLoadVoltage_mV(int32_t voltage_mV)
 {
-    // mV -> 0.01 V：1 V = 1000 mV，所以除以 10。
     int32_t centi_v = TJC_RoundDivI32((int64_t)voltage_mV, 10);
     centi_v = TJC_ClampI32(centi_v, 0, 99999);
-    TJC_SetXFloatRaw(TJC_OBJ_LOAD_VOLTAGE, centi_v);
+    return TJC_SetXFloatRaw(TJC_OBJ_LOAD_VOLTAGE, centi_v);
 }
 
-/**
- * @brief  更新负载功率显示。
- * @param  power_mW 负载功率，单位 mW，屏幕显示为 W 并保留 2 位小数。
- */
-void TJC_SetLoadPower_mW(int32_t power_mW)
+HAL_StatusTypeDef TJC_SetLoadPower_mW(int32_t power_mW)
 {
-    // mW -> 0.01 W：1 W = 1000 mW，所以除以 10。
     int32_t centi_w = TJC_RoundDivI32((int64_t)power_mW, 10);
     centi_w = TJC_ClampI32(centi_w, 0, 99999);
-    TJC_SetXFloatRaw(TJC_OBJ_LOAD_POWER, centi_w);
+    return TJC_SetXFloatRaw(TJC_OBJ_LOAD_POWER, centi_w);
 }
 
-/**
- * @brief  更新过流阈值显示。
- * @param  threshold_mA 过流阈值，单位 mA。
- */
-void TJC_SetOvercurrentThreshold_mA(int32_t threshold_mA)
+HAL_StatusTypeDef TJC_SetOvercurrentThreshold_mA(int32_t threshold_mA)
 {
     threshold_mA = TJC_ClampI32(threshold_mA, 0, 999);
-    TJC_SetInt(TJC_OBJ_OVERCURRENT, threshold_mA);
+    return TJC_SetInt(TJC_OBJ_OVERCURRENT, threshold_mA);
 }
 
-/**
- * @brief  一次性刷新主界面的所有动态显示量。
- * @param  data 主界面显示数据结构指针。
- */
-void TJC_UpdateAll(const TJC_HmiData_t *data)
+HAL_StatusTypeDef TJC_DAC_CH1(int32_t DAC_CH1_mV)
 {
+    int32_t centi_v = TJC_RoundDivI32((int64_t)DAC_CH1_mV, 10);
+    centi_v = TJC_ClampI32(centi_v, 0, 99999);
+    return TJC_SetXFloatRaw(TJC_OBJ_DAC_CH1_VOLTAGE, centi_v);
+}
+
+HAL_StatusTypeDef TJC_DAC_CH2(int32_t DAC_CH2_mV)
+{
+    int32_t centi_v = TJC_RoundDivI32((int64_t)DAC_CH2_mV, 10);
+    centi_v = TJC_ClampI32(centi_v, 0, 99999);
+    return TJC_SetXFloatRaw(TJC_OBJ_DAC_CH2_VOLTAGE, centi_v);
+}
+
+HAL_StatusTypeDef TJC_WaveformClear(uint8_t obj_id, uint8_t channel)
+{
+    return TJC_FormatAndSendCmd("cle %u,%u", (unsigned int)obj_id, (unsigned int)channel);
+}
+
+HAL_StatusTypeDef TJC_WaveformAdd(uint8_t obj_id, uint8_t channel, uint8_t value)
+{
+    return TJC_FormatAndSendCmd("add %u,%u,%u",
+                                (unsigned int)obj_id,
+                                (unsigned int)channel,
+                                (unsigned int)value);
+}
+
+HAL_StatusTypeDef TJC_WaveS0_CurrentAxisInit(void)
+{
+    // 运行时能确定的是“通道数据按 0~500mA -> 0~138 原始值映射”。
+    // 页面上的刻度文字仍建议在 HMI 工程里固定标注为 0~500mA。
+    return TJC_WaveformClear(TJC_WAVEFORM_CURRENT_ID, 255U);
+}
+
+HAL_StatusTypeDef TJC_WaveS0_AddCurrentPoint(int32_t set_current_mA, int32_t load_current_uA)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+    int32_t load_current_mA;
+
+    load_current_mA = TJC_RoundDivI32((int64_t)load_current_uA, 1000);
+    status = TJC_CombineStatus(status,
+                               TJC_WaveformAdd(TJC_WAVEFORM_CURRENT_ID,
+                                               TJC_WAVEFORM_SET_CH,
+                                               TJC_MapCurrentToWaveRaw(set_current_mA)));
+    status = TJC_CombineStatus(status,
+                               TJC_WaveformAdd(TJC_WAVEFORM_CURRENT_ID,
+                                               TJC_WAVEFORM_LOAD_CH,
+                                               TJC_MapCurrentToWaveRaw(load_current_mA)));
+    return status;
+}
+
+void TJC_WaveS0_DynamicWindowReset(int32_t window_min_mA)
+{
+    tjc_wave_window_min_mA = TJC_ClampI32(window_min_mA,
+                                          TJC_WAVEFORM_CURRENT_MIN_MA,
+                                          TJC_WAVEFORM_CURRENT_MAX_MA - TJC_WAVEFORM_WINDOW_SPAN_MA);
+}
+
+HAL_StatusTypeDef TJC_WaveS0_AddCurrentPointDynamicWindow(int32_t set_current_mA, int32_t load_current_uA)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+    int32_t load_current_mA;
+    int32_t sample_min_mA;
+    int32_t sample_max_mA;
+    int32_t window_min_mA;
+    int32_t window_max_mA;
+
+    load_current_mA = TJC_RoundDivI32((int64_t)load_current_uA, 1000);
+    set_current_mA = TJC_ClampI32(set_current_mA,
+                                  TJC_WAVEFORM_CURRENT_MIN_MA,
+                                  TJC_WAVEFORM_CURRENT_MAX_MA);
+    load_current_mA = TJC_ClampI32(load_current_mA,
+                                   TJC_WAVEFORM_CURRENT_MIN_MA,
+                                   TJC_WAVEFORM_CURRENT_MAX_MA);
+
+    sample_min_mA = set_current_mA < load_current_mA ? set_current_mA : load_current_mA;
+    sample_max_mA = set_current_mA > load_current_mA ? set_current_mA : load_current_mA;
+    TJC_AdjustDynamicWindow(sample_min_mA, sample_max_mA);
+
+    window_min_mA = tjc_wave_window_min_mA;
+    window_max_mA = window_min_mA + TJC_WAVEFORM_WINDOW_SPAN_MA;
+
+    status = TJC_CombineStatus(status,
+                               TJC_WaveformAdd(TJC_WAVEFORM_CURRENT_ID,
+                                               TJC_WAVEFORM_SET_CH,
+                                               TJC_MapCurrentToWindowRaw(set_current_mA,
+                                                                         window_min_mA,
+                                                                         window_max_mA)));
+    status = TJC_CombineStatus(status,
+                               TJC_WaveformAdd(TJC_WAVEFORM_CURRENT_ID,
+                                               TJC_WAVEFORM_LOAD_CH,
+                                               TJC_MapCurrentToWindowRaw(load_current_mA,
+                                                                         window_min_mA,
+                                                                         window_max_mA)));
+    return status;
+}
+
+HAL_StatusTypeDef TJC_UpdateAll(const TJC_HmiData_t *data)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+
     if (data == NULL) {
-        return;
+        TJC_SetLastError(HAL_ERROR);
+        return HAL_ERROR;
     }
 
-    // 一次刷新所有主界面动态量。建议不要过高频率调用，200~500ms 一次即可。
-    TJC_SetWorkModeConstCurrent();
-    TJC_SetOutputState(data->output_state);
-    TJC_SetProtectState(data->protect_state);
-    TJC_SetSetCurrent_mA(data->set_current_mA);
-    TJC_SetActualCurrent_uA(data->actual_current_uA);
-    TJC_SetLoadResistance_mOhm(data->load_resistance_mOhm);
-    TJC_SetLoadVoltage_mV(data->load_voltage_mV);
-    TJC_SetLoadPower_mW(data->load_power_mW);
-    TJC_SetOvercurrentThreshold_mA(data->overcurrent_mA);
+    status = TJC_CombineStatus(status, TJC_SetWorkModeConstCurrent());
+    status = TJC_CombineStatus(status, TJC_SetOutputState(data->output_state));
+    status = TJC_CombineStatus(status, TJC_SetProtectState(data->protect_state));
+    status = TJC_CombineStatus(status, TJC_SetSetCurrent_mA(data->set_current_mA));
+    status = TJC_CombineStatus(status, TJC_SetActualCurrent_uA(data->actual_current_uA));
+    status = TJC_CombineStatus(status, TJC_SetLoadResistance_mOhm(data->load_resistance_mOhm));
+    status = TJC_CombineStatus(status, TJC_SetLoadVoltage_mV(data->load_voltage_mV));
+    status = TJC_CombineStatus(status, TJC_SetLoadPower_mW(data->load_power_mW));
+    status = TJC_CombineStatus(status, TJC_SetOvercurrentThreshold_mA(data->overcurrent_mA));
+    return status;
+}
+
+
+/******************** HAL UART 回调接管 ********************/
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    TJC_OnTxFinished(huart, HAL_OK);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    TJC_OnTxFinished(huart, HAL_ERROR);
+}
+
+void HAL_UART_AbortTransmitCpltCallback(UART_HandleTypeDef *huart)
+{
+    TJC_OnTxFinished(huart, HAL_TIMEOUT);
 }
