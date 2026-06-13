@@ -1,0 +1,9 @@
+//
+// Created by lin on 2026/6/2.
+//
+
+#ifndef CI_SOURCE_FINISHED_DSP_TEST_COMMUNICATION_H
+#define CI_SOURCE_FINISHED_DSP_TEST_COMMUNICATION_H
+#include "TJC_HMI.h"
+void Global_OUTPUT(TJC_ProtectState_t j);
+#endif //CI_SOURCE_FINISHED_DSP_TEST_COMMUNICATION_H
